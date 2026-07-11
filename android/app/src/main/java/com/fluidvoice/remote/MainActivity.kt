@@ -1,12 +1,17 @@
 package com.fluidvoice.remote
 
 import android.Manifest
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.accessibility.AccessibilityManager
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -24,6 +29,8 @@ class MainActivity : Activity() {
     private lateinit var result: TextView
     private lateinit var record: Button
     private lateinit var enhancement: Switch
+    private lateinit var overlayButton: Button
+    private lateinit var accessibilityButton: Button
     private lateinit var store: CredentialStore
     private val client = RemoteClient()
     private val recorder by lazy { CompressedAudioRecorder(this) }
@@ -34,6 +41,11 @@ class MainActivity : Activity() {
         store = CredentialStore(this)
         setContentView(buildView())
         updateConnectionStatus()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::overlayButton.isInitialized) updateOverlayControls()
     }
 
     private fun buildView(): LinearLayout {
@@ -54,15 +66,19 @@ class MainActivity : Activity() {
         }
         enhancement = Switch(this).apply {
             text = "AI enhancement"
-            isChecked = getSharedPreferences("remote_preferences", MODE_PRIVATE)
-                .getBoolean("ai_enhancement", true)
+            isChecked = RemotePreferences.isAiEnhancementEnabled(this@MainActivity)
             setOnCheckedChangeListener { _, enabled ->
-                getSharedPreferences("remote_preferences", MODE_PRIVATE)
-                    .edit()
-                    .putBoolean("ai_enhancement", enabled)
-                    .apply()
+                RemotePreferences.setAiEnhancementEnabled(this@MainActivity, enabled)
                 updateConnectionStatus()
             }
+        }
+        accessibilityButton = Button(this).apply {
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        }
+        overlayButton = Button(this).apply {
+            setOnClickListener { toggleOverlay() }
         }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -73,6 +89,13 @@ class MainActivity : Activity() {
             addView(pair, ViewGroup.LayoutParams(-1, -2))
             addView(enhancement, ViewGroup.LayoutParams(-1, -2))
             addView(record, ViewGroup.LayoutParams(-1, -2))
+            addView(TextView(context).apply {
+                text = "Use FluidVoice inside other apps"
+                textSize = 18f
+                setPadding(0, padding, 0, 0)
+            }, ViewGroup.LayoutParams(-1, -2))
+            addView(accessibilityButton, ViewGroup.LayoutParams(-1, -2))
+            addView(overlayButton, ViewGroup.LayoutParams(-1, -2))
             addView(result, ViewGroup.LayoutParams(-1, -2))
         }
     }
@@ -105,7 +128,7 @@ class MainActivity : Activity() {
 
     private fun toggleRecording() {
         if (!isRecording && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 10)
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_DIRECT_MICROPHONE)
             return
         }
         if (!isRecording) {
@@ -142,7 +165,12 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 10 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) toggleRecording()
+        if (requestCode == REQUEST_DIRECT_MICROPHONE && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            toggleRecording()
+        }
+        if (requestCode == REQUEST_OVERLAY_MICROPHONE && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            startOverlayIfReady()
+        }
     }
 
     private fun updateConnectionStatus() {
@@ -153,6 +181,7 @@ class MainActivity : Activity() {
             else -> "Paired - Fast transcription"
         }
         record.isEnabled = connected
+        updateOverlayControls()
     }
 
     private fun resetRecordButton() {
@@ -163,5 +192,66 @@ class MainActivity : Activity() {
 
     private fun showError(error: Throwable) {
         status.text = error.message ?: "Operation failed"
+    }
+
+    private fun toggleOverlay() {
+        if (OverlayService.isRunning) {
+            stopService(Intent(this, OverlayService::class.java))
+            updateOverlayControls()
+            return
+        }
+        startOverlayIfReady()
+    }
+
+    private fun startOverlayIfReady() {
+        if (store.load() == null) {
+            status.text = "Pair with your Mac before enabling the overlay"
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_OVERLAY_MICROPHONE)
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName"),
+            ))
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+        }
+        startForegroundService(Intent(this, OverlayService::class.java))
+        overlayButton.postDelayed({ updateOverlayControls() }, 300)
+    }
+
+    private fun updateOverlayControls() {
+        if (!::overlayButton.isInitialized) return
+        accessibilityButton.text = if (isAccessibilityEnabled()) {
+            "Text insertion enabled"
+        } else {
+            "Enable text insertion"
+        }
+        overlayButton.text = when {
+            OverlayService.isRunning -> "Hide FluidVoice overlay"
+            !Settings.canDrawOverlays(this) -> "Allow display over other apps"
+            else -> "Show FluidVoice overlay"
+        }
+        overlayButton.isEnabled = store.load() != null
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        val manager = getSystemService(ACCESSIBILITY_SERVICE) as AccessibilityManager
+        return manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { it.resolveInfo.serviceInfo.packageName == packageName && it.resolveInfo.serviceInfo.name == FluidAccessibilityService::class.java.name }
+    }
+
+    companion object {
+        private const val REQUEST_DIRECT_MICROPHONE = 10
+        private const val REQUEST_OVERLAY_MICROPHONE = 11
+        private const val REQUEST_NOTIFICATIONS = 12
     }
 }
