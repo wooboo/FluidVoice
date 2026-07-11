@@ -17,12 +17,14 @@ final class RemoteDeviceKeychainStore: RemoteDeviceStore {
     }
 
     func allDevices() throws -> [RemoteDevice] {
-        try self.load().values.sorted { $0.pairedAt < $1.pairedAt }
+        try self.load().values.filter { $0.revokedAt == nil }.sorted { $0.pairedAt < $1.pairedAt }
     }
 
-    func remove(deviceID: String) throws {
+    func revoke(deviceID: String) throws {
         var devices = try self.load()
-        devices[deviceID] = nil
+        guard var device = devices[deviceID] else { return }
+        device.revokedAt = Date()
+        devices[deviceID] = device
         try self.save(devices)
     }
 

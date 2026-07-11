@@ -47,6 +47,18 @@ enum RemoteAPI {
     struct DictateResponse: Codable, Equatable {
         let rawText: String
         let finalText: String
+        var enhancementError: String?
+
+        init(rawText: String, finalText: String, enhancementError: String? = nil) {
+            self.rawText = rawText
+            self.finalText = finalText
+            self.enhancementError = enhancementError
+        }
+    }
+
+    struct DictateInput {
+        let audio: Data
+        let wantsEnhancement: Bool
     }
 
     private struct ErrorResponse: Encodable {

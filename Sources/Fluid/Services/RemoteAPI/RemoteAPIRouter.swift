@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 final class RemoteAPIRouter {
-    typealias Dictate = (Data) async throws -> RemoteAPI.DictateResponse
+    typealias Dictate = (RemoteAPI.DictateInput) async throws -> RemoteAPI.DictateResponse
 
     private let pairing: RemotePairingCoordinator
     private let dictate: Dictate
@@ -48,7 +48,11 @@ final class RemoteAPIRouter {
         }
 
         do {
-            return RemoteAPI.json(try await self.dictate(request.body))
+            let wantsEnhancement = request.headers["x-fluidvoice-enhance"]?.lowercased() != "false"
+            return RemoteAPI.json(try await self.dictate(.init(
+                audio: request.body,
+                wantsEnhancement: wantsEnhancement
+            )))
         } catch {
             return RemoteAPI.error(error.localizedDescription, status: 400)
         }

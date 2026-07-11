@@ -38,15 +38,19 @@ final class RemoteAPIRouterTests: XCTestCase {
         let pairing = RemotePairingCoordinator(store: store, randomToken: { "phone-token" })
         pairing.begin(secret: "pair-me")
         _ = try pairing.complete(.init(deviceID: "phone-1", deviceName: "Pixel", pairingSecret: "pair-me"))
-        let router = RemoteAPIRouter(pairing: pairing, dictate: { audio in
-            XCTAssertEqual(audio, Data("audio".utf8))
+        let router = RemoteAPIRouter(pairing: pairing, dictate: { input in
+            XCTAssertEqual(input.audio, Data("audio".utf8))
+            XCTAssertFalse(input.wantsEnhancement)
             return .init(rawText: "hello", finalText: "Hello.")
         })
 
         let response = await router.route(.init(
             method: "POST",
             path: "/remote/v1/dictate",
-            headers: ["authorization": "Bearer phone-token"],
+            headers: [
+                "authorization": "Bearer phone-token",
+                "x-fluidvoice-enhance": "false",
+            ],
             body: Data("audio".utf8)
         ))
 

@@ -12,7 +12,12 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 class CredentialStore(private val context: Context) {
-    data class Connection(val baseUrl: String, val fingerprint: String, val credential: String)
+    data class Connection(
+        val instanceId: String,
+        val baseUrl: String,
+        val fingerprint: String,
+        val credential: String,
+    )
 
     private val preferences = context.getSharedPreferences("remote_connection", Context.MODE_PRIVATE)
     private val alias = "fluidvoice-remote-credential"
@@ -21,6 +26,7 @@ class CredentialStore(private val context: Context) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val plaintext = JSONObject()
+            .put("instanceId", connection.instanceId)
             .put("baseUrl", connection.baseUrl)
             .put("fingerprint", connection.fingerprint)
             .put("credential", connection.credential)
@@ -38,7 +44,12 @@ class CredentialStore(private val context: Context) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv))
         val json = JSONObject(String(cipher.doFinal(ciphertext)))
-        Connection(json.getString("baseUrl"), json.getString("fingerprint"), json.getString("credential"))
+        Connection(
+            json.getString("instanceId"),
+            json.getString("baseUrl"),
+            json.getString("fingerprint"),
+            json.getString("credential"),
+        )
     }.getOrNull()
 
     private fun key(): SecretKey {

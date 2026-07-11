@@ -8,6 +8,7 @@ struct RemoteDevice: Codable, Equatable, Identifiable {
     let credentialHash: Data
     let pairedAt: Date
     var lastSeenAt: Date?
+    var revokedAt: Date?
 }
 
 @MainActor
@@ -27,6 +28,8 @@ final class InMemoryRemoteDeviceStore: RemoteDeviceStore {
     func device(matchingCredentialHash hash: Data) -> RemoteDevice? {
         self.devices.values.first { $0.credentialHash == hash }
     }
+
+    func device(id: String) -> RemoteDevice? { self.devices[id] }
 }
 
 enum RemotePairingError: Error {
@@ -36,11 +39,15 @@ enum RemotePairingError: Error {
 
 @MainActor
 final class RemotePairingCoordinator {
+    private struct ActiveSecret {
+        let hash: Data
+        let expiresAt: Date
+    }
+
     private let store: RemoteDeviceStore
     private let randomToken: () -> String
     private let now: () -> Date
-    private var activeSecretHash: Data?
-    private var activeSecretExpiresAt: Date?
+    private var activeSecret: ActiveSecret?
 
     init(
         store: RemoteDeviceStore,
@@ -53,14 +60,12 @@ final class RemotePairingCoordinator {
     }
 
     func begin(secret: String = RemotePairingCoordinator.secureToken()) -> String {
-        self.activeSecretHash = Self.hash(secret)
-        self.activeSecretExpiresAt = self.now().addingTimeInterval(300)
+        self.activeSecret = ActiveSecret(hash: Self.hash(secret), expiresAt: self.now().addingTimeInterval(300))
         return secret
     }
 
     func cancel() {
-        self.activeSecretHash = nil
-        self.activeSecretExpiresAt = nil
+        self.activeSecret = nil
     }
 
     func complete(_ request: RemoteAPI.PairRequest) throws -> RemoteAPI.PairResponse {
@@ -69,29 +74,37 @@ final class RemotePairingCoordinator {
         else {
             throw RemotePairingError.invalidDevice
         }
-        guard let expectedSecretHash = self.activeSecretHash,
-              let expiresAt = self.activeSecretExpiresAt,
-              self.now() <= expiresAt,
-              Self.hash(request.pairingSecret) == expectedSecretHash
+        guard let activeSecret = self.activeSecret,
+              self.now() <= activeSecret.expiresAt,
+              Self.hash(request.pairingSecret) == activeSecret.hash
         else {
             throw RemotePairingError.invalidOrExpiredSecret
         }
 
-        self.activeSecretHash = nil
-        self.activeSecretExpiresAt = nil
+        self.activeSecret = nil
         let credential = self.randomToken()
         try self.store.upsert(RemoteDevice(
             id: request.deviceID,
             name: request.deviceName,
             credentialHash: Self.hash(credential),
-            pairedAt: Date(),
-            lastSeenAt: nil
+            pairedAt: self.now(),
+            lastSeenAt: nil,
+            revokedAt: nil
         ))
         return RemoteAPI.PairResponse(credential: credential)
     }
 
     func authorizes(_ credential: String) -> Bool {
-        (try? self.store.device(matchingCredentialHash: Self.hash(credential))) != nil
+        guard var device = try? self.store.device(matchingCredentialHash: Self.hash(credential)),
+              device.revokedAt == nil
+        else { return false }
+        device.lastSeenAt = self.now()
+        do {
+            try self.store.upsert(device)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private static func hash(_ value: String) -> Data {

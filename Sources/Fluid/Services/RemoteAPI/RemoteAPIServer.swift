@@ -99,7 +99,7 @@ final class RemoteAPIServer: ObservableObject {
     }
 
     func revoke(deviceID: String) throws {
-        try self.store.remove(deviceID: deviceID)
+        try self.store.revoke(deviceID: deviceID)
         self.objectWillChange.send()
     }
 
@@ -128,17 +128,23 @@ final class RemoteAPIServer: ObservableObject {
         }
     }
 
-    private static func dictate(audio: Data) async throws -> RemoteAPI.DictateResponse {
-        let samples = try LocalAPIAudioDecoder.samples(fromAudioData: audio, suggestedExtension: "wav")
+    private static func dictate(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.DictateResponse {
+        let samples = try LocalAPIAudioDecoder.samples(fromAudioData: input.audio, suggestedExtension: "wav")
         let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)
         let raw = transcription.text
-        let enhanced: String
-        if DictationAIPostProcessingGate.isConfigured(for: .primary) {
-            enhanced = try await DictationPostProcessingService.shared.process(raw).text
-        } else {
-            enhanced = raw
+        guard input.wantsEnhancement, DictationAIPostProcessingGate.isConfigured(for: .primary) else {
+            return RemoteAPI.DictateResponse(rawText: raw, finalText: raw)
         }
-        return RemoteAPI.DictateResponse(rawText: raw, finalText: enhanced)
+        do {
+            let enhanced = try await DictationPostProcessingService.shared.process(raw).text
+            return RemoteAPI.DictateResponse(rawText: raw, finalText: enhanced)
+        } catch {
+            return RemoteAPI.DictateResponse(
+                rawText: raw,
+                finalText: raw,
+                enhancementError: error.localizedDescription
+            )
+        }
     }
 
     private static var instanceID: String {

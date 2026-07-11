@@ -23,13 +23,14 @@ class RemoteClient {
             setRequestProperty("Content-Type", "application/json")
         }
         val credential = JSONObject(String(response)).getString("credential")
-        return CredentialStore.Connection(payload.baseUrl, payload.certificateSha256, credential)
+        return CredentialStore.Connection(payload.instanceId, payload.baseUrl, payload.certificateSha256, credential)
     }
 
     fun dictate(connection: CredentialStore.Connection, wav: ByteArray): String {
         val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/dictate", wav) {
             setRequestProperty("Content-Type", "audio/wav")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
+            setRequestProperty("X-FluidVoice-Enhance", "true")
         }
         return JSONObject(String(response)).getString("finalText")
     }
