@@ -31,6 +31,7 @@ final class SmartNotesStoreTests: XCTestCase {
         )
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: captured.fileURL.path))
+        XCTAssertTrue(captured.fileURL.lastPathComponent.contains(id.uuidString.lowercased()))
         XCTAssertFalse(captured.isAIEnhanced)
         XCTAssertEqual(captured.body, "Remember to send the quarterly planning notes to Maya tomorrow.")
 
@@ -43,6 +44,17 @@ final class SmartNotesStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.notes[0].id, id)
         XCTAssertEqual(reloaded.notes[0].createdAt, date)
         XCTAssertEqual(reloaded.notes[0].body, captured.body)
+    }
+
+    func testBodyMarkerInsideNoteDoesNotDiscardEarlierContent() throws {
+        let store = SmartNotesStore(directoryURL: self.temporaryDirectory)
+        let body = "Before marker\n<!-- fluidvoice:body -->\nAfter marker"
+
+        let captured = try store.capture(rawText: body)
+        let reloaded = SmartNotesStore(directoryURL: self.temporaryDirectory)
+
+        XCTAssertEqual(reloaded.notes.first?.id, captured.id)
+        XCTAssertEqual(reloaded.notes.first?.body, body)
     }
 
     func testAIResponseParserExtractsJSONAndNormalizesTags() throws {

@@ -92,7 +92,10 @@ enum NotificationService {
                     self.deliverSmartNotesFallback(error: error, using: center)
                 }
             case .denied:
-                break
+                DebugLogger.shared.debug(
+                    "Skipping Smart Notes fallback notification because notification permission is denied",
+                    source: "NotificationService"
+                )
             @unknown default:
                 break
             }

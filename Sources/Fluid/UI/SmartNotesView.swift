@@ -6,6 +6,7 @@ struct SmartNotesView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @State private var selectedNoteID: UUID?
     @State private var notePendingDeletion: SmartNote?
+    @State private var deleteErrorMessage: String?
 
     private var selectedNote: SmartNote? {
         guard let selectedNoteID else { return self.store.notes.first }
@@ -45,13 +46,34 @@ struct SmartNotesView: View {
         ) {
             Button("Delete Note", role: .destructive) {
                 guard let note = self.notePendingDeletion else { return }
-                try? self.store.delete(note)
                 self.notePendingDeletion = nil
-                self.selectedNoteID = self.store.notes.first?.id
+                do {
+                    try self.store.delete(note)
+                    self.selectedNoteID = self.store.notes.first?.id
+                } catch {
+                    self.deleteErrorMessage = error.localizedDescription
+                    DebugLogger.shared.warning(
+                        "Failed to delete Smart Note: \(error.localizedDescription)",
+                        source: "SmartNotesView"
+                    )
+                }
             }
             Button("Cancel", role: .cancel) {
                 self.notePendingDeletion = nil
             }
+        }
+        .alert(
+            "Couldn’t Delete Note",
+            isPresented: Binding(
+                get: { self.deleteErrorMessage != nil },
+                set: { if !$0 { self.deleteErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                self.deleteErrorMessage = nil
+            }
+        } message: {
+            Text(self.deleteErrorMessage ?? "The note could not be deleted.")
         }
     }
 
@@ -166,11 +188,17 @@ struct SmartNotesView: View {
 
                     Divider()
 
-                    Text(note.body)
-                        .font(.body)
-                        .lineSpacing(5)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Group {
+                        if let attributedBody = try? AttributedString(markdown: note.body) {
+                            Text(attributedBody)
+                        } else {
+                            Text(note.body)
+                        }
+                    }
+                    .font(.body)
+                    .lineSpacing(5)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(28)
             }

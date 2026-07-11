@@ -42,6 +42,10 @@ struct SettingsBackupPayload: Codable, Equatable {
     // Optional so older backup files (which predate this setting) still decode.
     let pasteLastTranscriptionHotkeyShortcut: HotkeyShortcut?
     let pasteLastTranscriptionShortcutEnabled: Bool?
+    // Optional so backups created before Smart Notes still decode.
+    let smartNotesHotkeyShortcut: HotkeyShortcut?
+    let smartNotesShortcutEnabled: Bool?
+    let smartNotesAIEnhancementEnabled: Bool?
     let showThinkingTokens: Bool
     let hideFromDockAndAppSwitcher: Bool
     let showMainWindowAtLoginLaunch: Bool?

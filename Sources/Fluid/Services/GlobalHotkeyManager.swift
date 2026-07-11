@@ -794,6 +794,11 @@ final class GlobalHotkeyManager: NSObject {
                let smartNotesShortcut = self.smartNotesShortcut,
                smartNotesShortcut.matches(keyCode: keyCode, modifiers: eventModifiers)
             {
+                if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                    DebugLogger.shared.debug("Ignoring Smart Notes shortcut autorepeat", source: "GlobalHotkeyManager")
+                    return nil
+                }
+
                 switch self.hotkeyMode {
                 case .hold:
                     if !self.isSmartNotesKeyPressed {

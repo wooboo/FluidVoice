@@ -1130,7 +1130,6 @@ struct ContentView: View {
         case .smartNotes:
             self.smartNotesHotkeyShortcut = shortcut
             SettingsStore.shared.smartNotesHotkeyShortcut = shortcut
-            self.hotkeyManager?.updateSmartNotesShortcut(shortcut)
         case let .dictationPrompt(key):
             guard let selection = SettingsStore.shared.dictationPromptSelection(forConfigurationKey: key) else { return }
             var configuration = SettingsStore.shared.dictationPromptConfiguration(for: selection)
@@ -1181,7 +1180,6 @@ struct ContentView: View {
         case .smartNotes:
             self.isSmartNotesShortcutEnabled = enabled
             SettingsStore.shared.smartNotesShortcutEnabled = enabled
-            self.hotkeyManager?.updateSmartNotesShortcutEnabled(enabled)
         case .primaryDictation, .cancel, .dictationPrompt, .newPrompt:
             break
         }

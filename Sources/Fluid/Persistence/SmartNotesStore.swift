@@ -190,7 +190,7 @@ final class SmartNotesStore: ObservableObject {
 
         let content = String(contents[closingRange.upperBound...])
         let marker = "<!-- fluidvoice:body -->\n"
-        let markedBody = content.components(separatedBy: marker).last ?? content
+        let markedBody = content.hasPrefix(marker) ? String(content.dropFirst(marker.count)) : content
         let heading = "# \(title)\n\n"
         let body = markedBody.hasPrefix(heading) ? String(markedBody.dropFirst(heading.count)) : markedBody
 
@@ -263,7 +263,7 @@ final class SmartNotesStore: ObservableObject {
     }
 
     private static func fileName(for date: Date, id: UUID) -> String {
-        "\(self.fileNameDate.string(from: date))-\(id.uuidString.prefix(8).lowercased()).md"
+        "\(self.fileNameDate.string(from: date))-\(id.uuidString.lowercased()).md"
     }
 
     private static let iso8601: ISO8601DateFormatter = {

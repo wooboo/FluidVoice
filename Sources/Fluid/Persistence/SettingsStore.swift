@@ -2878,6 +2878,9 @@ final class SettingsStore: ObservableObject {
             cancelRecordingHotkeyShortcut: self.cancelRecordingHotkeyShortcut,
             pasteLastTranscriptionHotkeyShortcut: self.pasteLastTranscriptionHotkeyShortcut,
             pasteLastTranscriptionShortcutEnabled: self.pasteLastTranscriptionShortcutEnabled,
+            smartNotesHotkeyShortcut: self.smartNotesHotkeyShortcut,
+            smartNotesShortcutEnabled: self.smartNotesShortcutEnabled,
+            smartNotesAIEnhancementEnabled: self.smartNotesAIEnhancementEnabled,
             showThinkingTokens: self.showThinkingTokens,
             hideFromDockAndAppSwitcher: self.hideFromDockAndAppSwitcher,
             showMainWindowAtLoginLaunch: self.showMainWindowAtLoginLaunch,
@@ -2983,6 +2986,15 @@ final class SettingsStore: ObservableObject {
         }
         if let pasteLastTranscriptionShortcutEnabled = payload.pasteLastTranscriptionShortcutEnabled {
             self.pasteLastTranscriptionShortcutEnabled = pasteLastTranscriptionShortcutEnabled
+        }
+        if let smartNotesHotkeyShortcut = payload.smartNotesHotkeyShortcut {
+            self.smartNotesHotkeyShortcut = smartNotesHotkeyShortcut
+        }
+        if let smartNotesShortcutEnabled = payload.smartNotesShortcutEnabled {
+            self.smartNotesShortcutEnabled = smartNotesShortcutEnabled
+        }
+        if let smartNotesAIEnhancementEnabled = payload.smartNotesAIEnhancementEnabled {
+            self.smartNotesAIEnhancementEnabled = smartNotesAIEnhancementEnabled
         }
         self.showThinkingTokens = payload.showThinkingTokens
         self.hideFromDockAndAppSwitcher = payload.hideFromDockAndAppSwitcher
