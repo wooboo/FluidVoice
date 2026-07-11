@@ -983,6 +983,31 @@ final class DictationE2ETests: XCTestCase {
         }
     }
 
+    func testSmartNotesAIGateIgnoresDisabledDictationPrompt() {
+        self.withPromptAndProviderSettingsRestored {
+            let settings = SettingsStore.shared
+            let provider = SettingsStore.SavedProvider(
+                id: "smart-notes-provider-test",
+                name: "Smart Notes Test",
+                baseURL: "http://127.0.0.1:11434/v1",
+                models: ["test-model"]
+            )
+            let providerKey = DictationAIPostProcessingGate.providerKey(for: provider.id)
+            let fingerprint = DictationAIPostProcessingGate.providerFingerprint(
+                baseURL: provider.baseURL,
+                apiKey: ""
+            )!
+
+            settings.savedProviders = [provider]
+            settings.selectedProviderID = provider.id
+            settings.verifiedProviderFingerprints = [providerKey: fingerprint]
+            settings.setDictationPromptSelection(.off)
+
+            XCTAssertFalse(DictationAIPostProcessingGate.isConfigured(for: .primary))
+            XCTAssertTrue(SmartNoteAIPostProcessingGate.isConfigured())
+        }
+    }
+
     func testUnavailableSelectedProviderClearsSelection() {
         self.withProviderSettingsRestored {
             let settings = SettingsStore.shared
@@ -1505,6 +1530,7 @@ final class DictationE2ETests: XCTestCase {
                 self.availableModelsByProviderKey,
                 self.selectedModelByProviderKey,
                 self.privateAISelectedModelIDKey,
+                self.verifiedProviderFingerprintsKey,
             ],
             run: run
         )

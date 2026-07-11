@@ -14,7 +14,13 @@ final class RemoteAPIServer: ObservableObject {
     private let queue = DispatchQueue(label: "fluidvoice.remote-api", qos: .utility)
     private let store = RemoteDeviceKeychainStore()
     private lazy var pairing = RemotePairingCoordinator(store: self.store)
-    private lazy var router = RemoteAPIRouter(pairing: self.pairing, dictate: Self.dictate)
+    private lazy var router = RemoteAPIRouter(
+        pairing: self.pairing,
+        dictate: Self.dictate,
+        captureNote: Self.captureNote,
+        listNotes: { SmartNoteCaptureService.shared.notes() },
+        deleteNote: { try SmartNoteCaptureService.shared.delete(id: $0) }
+    )
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: RemoteAPIConnectionHandler] = [:]
     private var tlsIdentity: RemoteTLSIdentity?
@@ -234,6 +240,29 @@ final class RemoteAPIServer: ObservableObject {
                 enhancementError: error.localizedDescription
             )
         }
+    }
+
+    private static func captureNote(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.SmartNoteCaptureResponse {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.log(input.requestID, "note_pipeline_start bytes=\(input.audio.count) format=\(input.audioFileExtension)")
+        let samples = try LocalAPIAudioDecoder.samples(
+            fromAudioData: input.audio,
+            suggestedExtension: input.audioFileExtension
+        )
+        let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)
+        Self.log(
+            input.requestID,
+            "note_asr_done elapsedMs=\(Self.milliseconds(from: startedAt)) chars=\(transcription.text.count)"
+        )
+        let response = try await SmartNoteCaptureService.shared.capture(
+            rawText: transcription.text,
+            enhance: input.wantsEnhancement
+        )
+        Self.log(
+            input.requestID,
+            "note_pipeline_done enhanced=\(response.note.isAIEnhanced) totalMs=\(Self.milliseconds(from: startedAt))"
+        )
+        return response
     }
 
     private static func milliseconds(from start: TimeInterval, to end: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int {

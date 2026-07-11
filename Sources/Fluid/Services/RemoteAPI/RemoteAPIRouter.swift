@@ -3,13 +3,28 @@ import Foundation
 @MainActor
 final class RemoteAPIRouter {
     typealias Dictate = (RemoteAPI.DictateInput) async throws -> RemoteAPI.DictateResponse
+    typealias CaptureNote = (RemoteAPI.DictateInput) async throws -> RemoteAPI.SmartNoteCaptureResponse
+    typealias ListNotes = () -> [RemoteAPI.SmartNoteResponse]
+    typealias DeleteNote = (UUID) throws -> Void
 
     private let pairing: RemotePairingCoordinator
     private let dictate: Dictate
+    private let captureNote: CaptureNote
+    private let listNotes: ListNotes
+    private let deleteNote: DeleteNote
 
-    init(pairing: RemotePairingCoordinator, dictate: @escaping Dictate) {
+    init(
+        pairing: RemotePairingCoordinator,
+        dictate: @escaping Dictate,
+        captureNote: @escaping CaptureNote = { _ in throw SmartNotesError.emptyTranscript },
+        listNotes: @escaping ListNotes = { [] },
+        deleteNote: @escaping DeleteNote = { _ in throw SmartNotesError.noteNotFound }
+    ) {
         self.pairing = pairing
         self.dictate = dictate
+        self.captureNote = captureNote
+        self.listNotes = listNotes
+        self.deleteNote = deleteNote
     }
 
     func route(_ request: RemoteAPI.Request) async -> RemoteAPI.Response {
@@ -20,8 +35,65 @@ final class RemoteAPIRouter {
             return self.preconnect(request)
         case ("POST", "/remote/v1/dictate"):
             return await self.handleDictate(request)
+        case ("GET", "/remote/v1/notes"):
+            return self.handleListNotes(request)
+        case ("POST", "/remote/v1/notes"):
+            return await self.handleCaptureNote(request)
+        case ("DELETE", let path) where path.hasPrefix(Self.notesPathPrefix):
+            return self.handleDeleteNote(request, path: path)
         default:
             return RemoteAPI.error("Route not found.", status: 404)
+        }
+    }
+
+    private func handleDeleteNote(_ request: RemoteAPI.Request, path: String) -> RemoteAPI.Response {
+        guard let credential = Self.bearerCredential(from: request), self.pairing.authorizes(credential) else {
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        let idText = String(path.dropFirst(Self.notesPathPrefix.count))
+        guard !idText.contains("/"), let noteID = UUID(uuidString: idText) else {
+            return RemoteAPI.error("Invalid note ID.", status: 400)
+        }
+
+        do {
+            try self.deleteNote(noteID)
+            return RemoteAPI.Response(status: 204, headers: [:], body: Data())
+        } catch SmartNotesError.noteNotFound {
+            return RemoteAPI.error("Note not found.", status: 404)
+        } catch {
+            return RemoteAPI.error(error.localizedDescription, status: 400)
+        }
+    }
+
+    private func handleListNotes(_ request: RemoteAPI.Request) -> RemoteAPI.Response {
+        guard let credential = Self.bearerCredential(from: request), self.pairing.authorizes(credential) else {
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        return RemoteAPI.json(RemoteAPI.SmartNotesListResponse(notes: self.listNotes()))
+    }
+
+    private func handleCaptureNote(_ request: RemoteAPI.Request) async -> RemoteAPI.Response {
+        let requestID = Self.requestID(from: request)
+        guard let credential = Self.bearerCredential(from: request), self.pairing.authorizes(credential) else {
+            Self.log(requestID, "note_auth_rejected")
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        guard !request.body.isEmpty else {
+            return RemoteAPI.error("Missing audio body.", status: 400)
+        }
+
+        do {
+            let wantsEnhancement = request.headers["x-fluidvoice-enhance"]?.lowercased() != "false"
+            let response = try await self.captureNote(.init(
+                audio: request.body,
+                audioFileExtension: Self.audioFileExtension(from: request),
+                wantsEnhancement: wantsEnhancement,
+                requestID: requestID
+            ))
+            return RemoteAPI.json(response, status: 201)
+        } catch {
+            Self.log(requestID, "note_failed error=\(error.localizedDescription)")
+            return RemoteAPI.error(error.localizedDescription, status: 400)
         }
     }
 
@@ -99,4 +171,6 @@ final class RemoteAPIRouter {
         if contentType.contains("audio/mp4") || contentType.contains("audio/m4a") { return "m4a" }
         return "wav"
     }
+
+    private static let notesPathPrefix = "/remote/v1/notes/"
 }

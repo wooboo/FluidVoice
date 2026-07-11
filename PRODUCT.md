@@ -6,11 +6,11 @@ product
 
 ## Users
 
-People who dictate frequently on Android and macOS and want private, desktop-powered transcription available inside any editable app without changing keyboards.
+People who dictate frequently on Android and macOS and want private, desktop-powered transcription and voice notes available without changing keyboards or moving their workflow to another service.
 
 ## Product Purpose
 
-FluidVoice turns speech into polished text using a paired desktop. Success means starting a dictation from the current app, understanding its state at a glance, and receiving text in the focused field with minimal interruption.
+FluidVoice turns speech into polished text or a durable Smart Note using a paired desktop. Success means capturing from the current Android app, understanding state at a glance, and either receiving text in the focused field or finding an organized note immediately in the FluidVoice app.
 
 ## Brand Personality
 
@@ -27,6 +27,8 @@ Do not imitate chat-head menus, persistent toolbars, playful assistant mascots, 
 - Prefer immediate feedback over decorative motion.
 - Preserve user control before text is committed.
 - Fall back safely when an app cannot accept inserted text.
+- Make Smart Notes the useful home of the Android app, not a hidden secondary feature.
+- Distinguish Dictation and Note before recording so the destination is always predictable.
 
 ## Accessibility & Inclusion
 

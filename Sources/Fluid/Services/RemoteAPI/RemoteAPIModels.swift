@@ -71,6 +71,26 @@ enum RemoteAPI {
         let requestID: String
     }
 
+    struct SmartNoteResponse: Codable, Equatable {
+        let id: String
+        let createdAt: String
+        let title: String
+        let category: String?
+        let tags: [String]
+        let body: String
+        let isAIEnhanced: Bool
+    }
+
+    struct SmartNotesListResponse: Codable, Equatable {
+        let notes: [SmartNoteResponse]
+    }
+
+    struct SmartNoteCaptureResponse: Codable, Equatable {
+        let note: SmartNoteResponse
+        let rawText: String
+        let enhancementError: String?
+    }
+
     private struct ErrorResponse: Encodable {
         let error: String
     }

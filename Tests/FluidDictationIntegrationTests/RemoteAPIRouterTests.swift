@@ -260,6 +260,125 @@ final class RemoteAPIRouterTests: XCTestCase {
         XCTAssertEqual(response.status, 401)
     }
 
+    func testNotesRejectMissingCredential() async throws {
+        let router = RemoteAPIRouter(
+            pairing: RemotePairingCoordinator(store: InMemoryRemoteDeviceStore()),
+            dictate: { _ in XCTFail("Inference must not run"); return .init(rawText: "", finalText: "") },
+            captureNote: { _ in XCTFail("Capture must not run"); return .fixture },
+            listNotes: { XCTFail("Listing must not run"); return [] }
+        )
+
+        let listResponse = await router.route(.init(method: "GET", path: "/remote/v1/notes"))
+        let captureResponse = await router.route(.init(
+            method: "POST",
+            path: "/remote/v1/notes",
+            body: Data("audio".utf8)
+        ))
+
+        XCTAssertEqual(listResponse.status, 401)
+        XCTAssertEqual(captureResponse.status, 401)
+    }
+
+    func testPairedDeviceCanListNotes() async throws {
+        let pairing = pairedCoordinator()
+        let note = RemoteAPI.SmartNoteResponse(
+            id: "note-1",
+            createdAt: "2026-07-11T10:30:00Z",
+            title: "Release plan",
+            category: "Work",
+            tags: ["release", "android"],
+            body: "Ship Smart Notes.",
+            isAIEnhanced: true
+        )
+        let router = RemoteAPIRouter(
+            pairing: pairing,
+            dictate: { _ in .init(rawText: "", finalText: "") },
+            captureNote: { _ in .fixture },
+            listNotes: { [note] }
+        )
+
+        let response = await router.route(.init(
+            method: "GET",
+            path: "/remote/v1/notes",
+            headers: ["authorization": "Bearer phone-token"]
+        ))
+
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(try response.decode(RemoteAPI.SmartNotesListResponse.self).notes, [note])
+    }
+
+    func testPairedDeviceCanCaptureSmartNote() async throws {
+        let pairing = pairedCoordinator()
+        let router = RemoteAPIRouter(
+            pairing: pairing,
+            dictate: { _ in .init(rawText: "", finalText: "") },
+            captureNote: { input in
+                XCTAssertEqual(input.audio, Data("audio".utf8))
+                XCTAssertEqual(input.audioFileExtension, "m4a")
+                XCTAssertFalse(input.wantsEnhancement)
+                return .fixture
+            },
+            listNotes: { [] }
+        )
+
+        let response = await router.route(.init(
+            method: "POST",
+            path: "/remote/v1/notes",
+            headers: [
+                "authorization": "Bearer phone-token",
+                "content-type": "audio/mp4",
+                "x-fluidvoice-enhance": "false",
+            ],
+            body: Data("audio".utf8)
+        ))
+
+        XCTAssertEqual(response.status, 201)
+        XCTAssertEqual(try response.decode(RemoteAPI.SmartNoteCaptureResponse.self), .fixture)
+    }
+
+    func testPairedDeviceCanDeleteSmartNote() async throws {
+        let pairing = pairedCoordinator()
+        let noteID = UUID(uuidString: "6A1AF9AF-EE38-49AA-8E51-23E573A62002")!
+        var deletedID: UUID?
+        let router = RemoteAPIRouter(
+            pairing: pairing,
+            dictate: { _ in .init(rawText: "", finalText: "") },
+            deleteNote: { deletedID = $0 }
+        )
+
+        let response = await router.route(.init(
+            method: "DELETE",
+            path: "/remote/v1/notes/\(noteID.uuidString.lowercased())",
+            headers: ["authorization": "Bearer phone-token"]
+        ))
+
+        XCTAssertEqual(response.status, 204)
+        XCTAssertTrue(response.body.isEmpty)
+        XCTAssertEqual(deletedID, noteID)
+    }
+
+    func testDeleteNoteRejectsMissingCredentialAndInvalidID() async throws {
+        let pairing = pairedCoordinator()
+        let router = RemoteAPIRouter(
+            pairing: pairing,
+            dictate: { _ in .init(rawText: "", finalText: "") },
+            deleteNote: { _ in XCTFail("Delete must not run") }
+        )
+
+        let unauthorized = await router.route(.init(
+            method: "DELETE",
+            path: "/remote/v1/notes/6A1AF9AF-EE38-49AA-8E51-23E573A62002"
+        ))
+        let invalid = await router.route(.init(
+            method: "DELETE",
+            path: "/remote/v1/notes/not-a-uuid",
+            headers: ["authorization": "Bearer phone-token"]
+        ))
+
+        XCTAssertEqual(unauthorized.status, 401)
+        XCTAssertEqual(invalid.status, 400)
+    }
+
     func testPairingSecretExpiresAfterFiveMinutes() throws {
         var now = Date(timeIntervalSince1970: 1_000)
         let pairing = RemotePairingCoordinator(
@@ -276,6 +395,30 @@ final class RemoteAPIRouterTests: XCTestCase {
             pairingSecret: "short-lived"
         )))
     }
+}
+
+@MainActor
+private func pairedCoordinator() -> RemotePairingCoordinator {
+    let pairing = RemotePairingCoordinator(store: InMemoryRemoteDeviceStore(), randomToken: { "phone-token" })
+    pairing.begin(secret: "pair-me")
+    _ = try! pairing.complete(.init(deviceID: "phone-1", deviceName: "Pixel", pairingSecret: "pair-me"))
+    return pairing
+}
+
+private extension RemoteAPI.SmartNoteCaptureResponse {
+    static let fixture = Self(
+        note: .init(
+            id: "note-1",
+            createdAt: "2026-07-11T10:30:00Z",
+            title: "Release plan",
+            category: nil,
+            tags: [],
+            body: "Ship Smart Notes.",
+            isAIEnhanced: false
+        ),
+        rawText: "Ship Smart Notes.",
+        enhancementError: nil
+    )
 }
 
 private extension RemoteAPI.Request {

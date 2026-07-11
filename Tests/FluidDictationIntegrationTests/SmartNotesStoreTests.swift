@@ -91,4 +91,14 @@ final class SmartNotesStoreTests: XCTestCase {
         XCTAssertEqual(updated.tags, ["launch", "release"])
         XCTAssertEqual(store.notes.count, 1)
     }
+
+    func testDeleteRemovesMarkdownFileAndReloadsStore() throws {
+        let store = SmartNotesStore(directoryURL: self.temporaryDirectory)
+        let note = try store.capture(rawText: "Delete this note")
+
+        try store.delete(note)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: note.fileURL.path))
+        XCTAssertTrue(store.notes.isEmpty)
+    }
 }
