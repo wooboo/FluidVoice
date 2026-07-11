@@ -35,17 +35,20 @@ class MainActivity : Activity() {
     private val client = RemoteClient()
     private val recorder by lazy { CompressedAudioRecorder(this) }
     private var isRecording = false
+    private var preconnectThread: Thread? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = CredentialStore(this)
         setContentView(buildView())
         updateConnectionStatus()
+        restoreOverlayIfReady()
     }
 
     override fun onResume() {
         super.onResume()
         if (::overlayButton.isInitialized) updateOverlayControls()
+        restoreOverlayIfReady()
     }
 
     private fun buildView(): LinearLayout {
@@ -137,6 +140,7 @@ class MainActivity : Activity() {
                 return
             }
             isRecording = true
+            preconnectThread = store.load()?.let { startPreconnect(it, "direct") }
             record.text = "Stop and transcribe"
             status.text = "Listening..."
             return
@@ -156,7 +160,9 @@ class MainActivity : Activity() {
         )
         val connection = store.load() ?: return
         val enhance = enhancement.isChecked
+        val preparation = preconnectThread.also { preconnectThread = null }
         thread {
+            preparation?.join(PRECONNECT_WAIT_MS)
             runCatching { client.dictate(connection, audio, enhance) }
                 .onSuccess { text -> runOnUiThread { result.text = text; resetRecordButton() } }
                 .onFailure { runOnUiThread { showError(it); resetRecordButton() } }
@@ -196,6 +202,7 @@ class MainActivity : Activity() {
 
     private fun toggleOverlay() {
         if (OverlayService.isRunning) {
+            RemotePreferences.setOverlayEnabled(this, false)
             stopService(Intent(this, OverlayService::class.java))
             updateOverlayControls()
             return
@@ -208,6 +215,7 @@ class MainActivity : Activity() {
             status.text = "Pair with your Mac before enabling the overlay"
             return
         }
+        RemotePreferences.setOverlayEnabled(this, true)
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_OVERLAY_MICROPHONE)
             return
@@ -249,9 +257,25 @@ class MainActivity : Activity() {
             .any { it.resolveInfo.serviceInfo.packageName == packageName && it.resolveInfo.serviceInfo.name == FluidAccessibilityService::class.java.name }
     }
 
+    private fun restoreOverlayIfReady() {
+        if (!RemotePreferences.isOverlayEnabled(this) || OverlayService.isRunning || store.load() == null) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+        if (!Settings.canDrawOverlays(this)) return
+        runCatching { startForegroundService(Intent(this, OverlayService::class.java)) }
+            .onFailure { Log.w(TAG, "Unable to restore overlay", it) }
+    }
+
+    private fun startPreconnect(connection: CredentialStore.Connection, source: String): Thread =
+        thread(name = "fluidvoice-$source-preconnect") {
+            runCatching { client.preconnect(connection) }
+                .onFailure { Log.i(TAG, "REMOTE_BENCH phase=preconnect_failed source=$source error=${it.message}") }
+        }
+
     companion object {
         private const val REQUEST_DIRECT_MICROPHONE = 10
         private const val REQUEST_OVERLAY_MICROPHONE = 11
         private const val REQUEST_NOTIFICATIONS = 12
+        private const val PRECONNECT_WAIT_MS = 250L
+        private const val TAG = "FluidVoiceRemote"
     }
 }

@@ -227,6 +227,7 @@ private final class RemoteAPIConnectionHandler {
     private var requestStartedAt: TimeInterval?
     private var activeRequestID: String?
     private var requestCount = 0
+    private var idleTimeoutTask: Task<Void, Never>?
     var onClose: (() -> Void)?
 
     init(connection: NWConnection, router: RemoteAPIRouter) {
@@ -236,6 +237,7 @@ private final class RemoteAPIConnectionHandler {
 
     func start(on queue: DispatchQueue) {
         self.connection.start(queue: queue)
+        self.armIdleTimeout()
         self.receive()
     }
 
@@ -247,6 +249,7 @@ private final class RemoteAPIConnectionHandler {
                 guard let self else { return }
                 if error != nil || complete { self.close(); return }
                 if let data, !data.isEmpty {
+                    self.idleTimeoutTask?.cancel()
                     if self.requestStartedAt == nil { self.requestStartedAt = ProcessInfo.processInfo.systemUptime }
                     self.buffer.append(data)
                 }
@@ -263,7 +266,9 @@ private final class RemoteAPIConnectionHandler {
                     )
                     self.send(await self.router.route(request))
                 case let .failure(response): self.send(response)
-                case .incomplete: self.receive()
+                case .incomplete:
+                    self.armIdleTimeout()
+                    self.receive()
                 }
             }
         }
@@ -320,7 +325,7 @@ private final class RemoteAPIConnectionHandler {
         headers["Content-Length"] = String(response.body.count)
         headers["Connection"] = shouldKeepAlive ? "keep-alive" : "close"
         if shouldKeepAlive { headers["Keep-Alive"] = "timeout=30, max=20" }
-        let reason = [200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 411: "Length Required", 413: "Payload Too Large", 500: "Internal Server Error"][response.status] ?? "Response"
+        let reason = [200: "OK", 201: "Created", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 411: "Length Required", 413: "Payload Too Large", 500: "Internal Server Error"][response.status] ?? "Response"
         var data = Data("HTTP/1.1 \(response.status) \(reason)\r\n".utf8)
         for (key, value) in headers.sorted(by: { $0.key < $1.key }) { data.append(Data("\(key): \(value)\r\n".utf8)) }
         data.append(Data("\r\n".utf8))
@@ -331,6 +336,7 @@ private final class RemoteAPIConnectionHandler {
                 guard error == nil, shouldKeepAlive else { self.close(); return }
                 self.activeRequestID = nil
                 self.requestStartedAt = nil
+                self.armIdleTimeout()
                 self.receive()
             }
         })
@@ -339,8 +345,19 @@ private final class RemoteAPIConnectionHandler {
     private func close() {
         guard !self.closed else { return }
         self.closed = true
+        self.idleTimeoutTask?.cancel()
+        self.idleTimeoutTask = nil
         self.connection.cancel()
         self.onClose?()
+    }
+
+    private func armIdleTimeout() {
+        self.idleTimeoutTask?.cancel()
+        self.idleTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.close()
+        }
     }
 
     private static func milliseconds(since start: TimeInterval) -> Int {

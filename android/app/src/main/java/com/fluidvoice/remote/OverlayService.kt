@@ -52,11 +52,26 @@ class OverlayService : Service() {
     private var state: OverlayState = OverlayState.Idle
     private var idleX = 0
     private var idleY = 0
+    private var preconnectThread: Thread? = null
+    private var amplitudeWindowStartedAt = 0L
+    private var amplitudeMinimum = Int.MAX_VALUE
+    private var amplitudeMaximum = 0
 
     private val amplitudeSampler = object : Runnable {
         override fun run() {
             if (state != OverlayState.Recording) return
-            waveform.pushAmplitude(recorder.maxAmplitude())
+            val amplitude = recorder.maxAmplitude()
+            waveform.pushAmplitude(amplitude)
+            amplitudeMinimum = minOf(amplitudeMinimum, amplitude)
+            amplitudeMaximum = maxOf(amplitudeMaximum, amplitude)
+            val now = SystemClock.elapsedRealtime()
+            if (now - amplitudeWindowStartedAt >= 1_000) {
+                Log.i(
+                    TAG,
+                    "AUDIO_LEVEL min=$amplitudeMinimum max=$amplitudeMaximum normalizedMax=${AudioLevelMapper.normalize(amplitudeMaximum)}",
+                )
+                resetAmplitudeWindow(now)
+            }
             handler.postDelayed(this, 70)
         }
     }
@@ -70,7 +85,10 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) stopSelf()
+        if (intent?.action == ACTION_STOP) {
+            RemotePreferences.setOverlayEnabled(this, false)
+            stopSelf()
+        }
         return START_STICKY
     }
 
@@ -178,6 +196,8 @@ class OverlayService : Service() {
         runCatching { recorder.start() }
             .onSuccess {
                 state = next
+                resetAmplitudeWindow(SystemClock.elapsedRealtime())
+                preconnectThread = CredentialStore(this).load()?.let { startPreconnect(it) }
                 collapsedButton.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 renderState()
                 handler.post(amplitudeSampler)
@@ -220,7 +240,9 @@ class OverlayService : Service() {
             return
         }
         val enhance = RemotePreferences.isAiEnhancementEnabled(this)
+        val preparation = preconnectThread.also { preconnectThread = null }
         thread(name = "fluidvoice-overlay-dictation") {
+            preparation?.join(PRECONNECT_WAIT_MS)
             runCatching { client.dictate(connection, audio, enhance) }
                 .onSuccess { text -> handler.post { deliverText(text) } }
                 .onFailure { error -> handler.post { showError(error.message ?: "Transcription failed") } }
@@ -366,10 +388,24 @@ class OverlayService : Service() {
     private fun animationsEnabled(): Boolean =
         Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
 
+    private fun resetAmplitudeWindow(now: Long) {
+        amplitudeWindowStartedAt = now
+        amplitudeMinimum = Int.MAX_VALUE
+        amplitudeMaximum = 0
+    }
+
+    private fun startPreconnect(connection: CredentialStore.Connection): Thread =
+        thread(name = "fluidvoice-overlay-preconnect") {
+            runCatching { client.preconnect(connection) }
+                .onFailure { Log.i(TAG, "REMOTE_BENCH phase=preconnect_failed source=overlay error=${it.message}") }
+        }
+
     companion object {
         const val ACTION_STOP = "com.fluidvoice.remote.STOP_OVERLAY"
         private const val CHANNEL_ID = "fluidvoice-overlay"
         private const val NOTIFICATION_ID = 7301
+        private const val PRECONNECT_WAIT_MS = 250L
+        private const val TAG = "FluidVoiceRemote"
 
         @Volatile
         var isRunning = false

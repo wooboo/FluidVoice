@@ -16,11 +16,23 @@ final class RemoteAPIRouter {
         switch (request.method, request.path) {
         case ("POST", "/remote/v1/pair"):
             return self.pair(request)
+        case ("POST", "/remote/v1/preconnect"):
+            return self.preconnect(request)
         case ("POST", "/remote/v1/dictate"):
             return await self.handleDictate(request)
         default:
             return RemoteAPI.error("Route not found.", status: 404)
         }
+    }
+
+    private func preconnect(_ request: RemoteAPI.Request) -> RemoteAPI.Response {
+        let requestID = Self.requestID(from: request)
+        guard let credential = Self.bearerCredential(from: request), self.pairing.authorizes(credential) else {
+            Self.log(requestID, "preconnect_auth_rejected")
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        Self.log(requestID, "preconnect_ready")
+        return RemoteAPI.Response(status: 204, headers: [:], body: Data())
     }
 
     private func pair(_ request: RemoteAPI.Request) -> RemoteAPI.Response {
