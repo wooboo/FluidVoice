@@ -50,6 +50,17 @@ class RemoteClient {
         return JSONObject(String(response)).getString("finalText")
     }
 
+    fun preconnect(connection: CredentialStore.Connection) {
+        val requestId = UUID.randomUUID().toString()
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=preconnect_start")
+        request(connection.baseUrl, connection.fingerprint, "/remote/v1/preconnect", ByteArray(0)) {
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+            setRequestProperty("X-Request-ID", requestId)
+        }
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=preconnect_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+    }
+
     private fun request(
         baseUrl: String,
         fingerprint: String,

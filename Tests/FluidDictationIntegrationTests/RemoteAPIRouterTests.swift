@@ -60,6 +60,37 @@ final class RemoteAPIRouterTests: XCTestCase {
         XCTAssertEqual(try response.decode(RemoteAPI.DictateResponse.self).finalText, "Hello.")
     }
 
+    func testPairedDeviceCanPreconnectWithoutRunningInference() async throws {
+        let store = InMemoryRemoteDeviceStore()
+        let pairing = RemotePairingCoordinator(store: store, randomToken: { "phone-token" })
+        pairing.begin(secret: "pair-me")
+        _ = try pairing.complete(.init(deviceID: "phone-1", deviceName: "Pixel", pairingSecret: "pair-me"))
+        let router = RemoteAPIRouter(
+            pairing: pairing,
+            dictate: { _ in XCTFail("Preconnect must not run inference"); return .init(rawText: "", finalText: "") }
+        )
+
+        let response = await router.route(.init(
+            method: "POST",
+            path: "/remote/v1/preconnect",
+            headers: ["authorization": "Bearer phone-token"]
+        ))
+
+        XCTAssertEqual(response.status, 204)
+        XCTAssertTrue(response.body.isEmpty)
+    }
+
+    func testPreconnectRejectsMissingCredential() async throws {
+        let router = RemoteAPIRouter(
+            pairing: RemotePairingCoordinator(store: InMemoryRemoteDeviceStore()),
+            dictate: { _ in XCTFail("Preconnect must not run inference"); return .init(rawText: "", finalText: "") }
+        )
+
+        let response = await router.route(.init(method: "POST", path: "/remote/v1/preconnect"))
+
+        XCTAssertEqual(response.status, 401)
+    }
+
     func testPairingSecretExpiresAfterFiveMinutes() throws {
         var now = Date(timeIntervalSince1970: 1_000)
         let pairing = RemotePairingCoordinator(
