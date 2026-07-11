@@ -130,8 +130,11 @@ final class RemoteAPIServer: ObservableObject {
 
     private static func dictate(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.DictateResponse {
         let startedAt = ProcessInfo.processInfo.systemUptime
-        Self.log(input.requestID, "pipeline_start bytes=\(input.audio.count)")
-        let samples = try LocalAPIAudioDecoder.samples(fromAudioData: input.audio, suggestedExtension: "wav")
+        Self.log(input.requestID, "pipeline_start bytes=\(input.audio.count) format=\(input.audioFileExtension)")
+        let samples = try LocalAPIAudioDecoder.samples(
+            fromAudioData: input.audio,
+            suggestedExtension: input.audioFileExtension
+        )
         let decodedAt = ProcessInfo.processInfo.systemUptime
         Self.log(input.requestID, "decode_done samples=\(samples.count) elapsedMs=\(Self.milliseconds(from: startedAt, to: decodedAt))")
         let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)

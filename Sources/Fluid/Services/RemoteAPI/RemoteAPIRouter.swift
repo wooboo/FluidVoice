@@ -55,6 +55,7 @@ final class RemoteAPIRouter {
             Self.log(requestID, "dispatch bytes=\(request.body.count) enhance=\(wantsEnhancement)")
             return RemoteAPI.json(try await self.dictate(.init(
                 audio: request.body,
+                audioFileExtension: Self.audioFileExtension(from: request),
                 wantsEnhancement: wantsEnhancement,
                 requestID: requestID
             )))
@@ -79,5 +80,11 @@ final class RemoteAPIRouter {
 
     private static func log(_ requestID: String, _ message: String) {
         DebugLogger.shared.info("REMOTE_BENCH id=\(requestID) \(message)", source: "RemoteAPIBenchmark")
+    }
+
+    private static func audioFileExtension(from request: RemoteAPI.Request) -> String {
+        let contentType = request.headers["content-type"]?.lowercased() ?? ""
+        if contentType.contains("audio/mp4") || contentType.contains("audio/m4a") { return "m4a" }
+        return "wav"
     }
 }

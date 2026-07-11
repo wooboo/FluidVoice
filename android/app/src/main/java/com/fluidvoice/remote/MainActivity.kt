@@ -26,7 +26,7 @@ class MainActivity : Activity() {
     private lateinit var enhancement: Switch
     private lateinit var store: CredentialStore
     private val client = RemoteClient()
-    private val recorder = WavRecorder()
+    private val recorder by lazy { CompressedAudioRecorder(this) }
     private var isRecording = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,7 +109,10 @@ class MainActivity : Activity() {
             return
         }
         if (!isRecording) {
-            recorder.start()
+            runCatching { recorder.start() }.onFailure {
+                showError(it)
+                return
+            }
             isRecording = true
             record.text = "Stop and transcribe"
             status.text = "Listening..."
@@ -119,15 +122,19 @@ class MainActivity : Activity() {
         record.isEnabled = false
         record.text = "Transcribing..."
         val stopStartedAt = SystemClock.elapsedRealtime()
-        val wav = recorder.stop()
+        val audio = runCatching { recorder.stop() }.getOrElse {
+            showError(it)
+            resetRecordButton()
+            return
+        }
         Log.i(
             "FluidVoiceRemote",
-            "REMOTE_BENCH phase=recording_stopped elapsedMs=${SystemClock.elapsedRealtime() - stopStartedAt} bytes=${wav.size}",
+            "REMOTE_BENCH phase=recording_stopped elapsedMs=${SystemClock.elapsedRealtime() - stopStartedAt} bytes=${audio.size} format=m4a",
         )
         val connection = store.load() ?: return
         val enhance = enhancement.isChecked
         thread {
-            runCatching { client.dictate(connection, wav, enhance) }
+            runCatching { client.dictate(connection, audio, enhance) }
                 .onSuccess { text -> runOnUiThread { result.text = text; resetRecordButton() } }
                 .onFailure { runOnUiThread { showError(it); resetRecordButton() } }
         }

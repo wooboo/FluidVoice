@@ -66,6 +66,7 @@ enum RemoteAPI {
 
     struct DictateInput {
         let audio: Data
+        let audioFileExtension: String
         let wantsEnhancement: Bool
         let requestID: String
     }
