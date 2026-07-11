@@ -1483,6 +1483,11 @@ struct SettingsView: View {
                         .padding(16)
                 }
 
+                ThemedCard(style: .standard) {
+                    RemoteAccessSettingsView()
+                        .padding(16)
+                }
+
                 // Debug Settings Card
                 ThemedCard(style: .standard) {
                     VStack(alignment: .leading, spacing: 14) {
