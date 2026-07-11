@@ -33,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Initialize app settings (dock visibility, etc.)
         SettingsStore.shared.initializeAppSettings()
         LocalAPIServer.shared.start()
+        RemoteAPIServer.shared.start()
 
         // Record first-open synchronously before async analytics bootstrap so
         // onboarding initialization is deterministic on brand-new installs.
@@ -66,6 +67,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         DebugLogger.shared.info("Application will terminate", source: "AppDelegate")
         self.shutdownPrivateAIRuntimeForTermination()
         LocalAPIServer.shared.stop()
+        RemoteAPIServer.shared.stop()
         // Clean up the update check timer
         self.updateCheckTimer?.invalidate()
         self.updateCheckTimer = nil

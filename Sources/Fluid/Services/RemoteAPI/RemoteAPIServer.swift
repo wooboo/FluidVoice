@@ -1,0 +1,283 @@
+import Combine
+import Darwin
+import Foundation
+import Network
+import Security
+
+@MainActor
+final class RemoteAPIServer: ObservableObject {
+    static let shared = RemoteAPIServer()
+
+    @Published private(set) var isRunning = false
+    @Published private(set) var lastError: String?
+
+    private let queue = DispatchQueue(label: "fluidvoice.remote-api", qos: .utility)
+    private let store = RemoteDeviceKeychainStore()
+    private lazy var pairing = RemotePairingCoordinator(store: self.store)
+    private lazy var router = RemoteAPIRouter(pairing: self.pairing, dictate: Self.dictate)
+    private var listener: NWListener?
+    private var connections: [ObjectIdentifier: RemoteAPIConnectionHandler] = [:]
+    private var tlsIdentity: RemoteTLSIdentity?
+
+    var isEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "RemoteAPIEnabled") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "RemoteAPIEnabled")
+            newValue ? self.start() : self.stop()
+            self.objectWillChange.send()
+        }
+    }
+
+    var port: UInt16 { RemoteAPI.defaultPort }
+
+    private init() {}
+
+    func start() {
+        guard self.isEnabled, self.listener == nil else { return }
+        do {
+            let identity = try RemoteTLSIdentityStore.loadOrCreate()
+            let tls = NWProtocolTLS.Options()
+            guard let protocolIdentity = sec_identity_create(identity.identity) else {
+                throw NSError(domain: "RemoteAPIServer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to configure TLS identity."])
+            }
+            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, protocolIdentity)
+            sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+            sec_protocol_options_set_max_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+
+            let listener = try NWListener(
+                using: NWParameters(tls: tls, tcp: NWProtocolTCP.Options()),
+                on: NWEndpoint.Port(rawValue: self.port)!
+            )
+            listener.newConnectionHandler = { [weak self] connection in
+                Task { @MainActor [weak self] in self?.accept(connection) }
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                Task { @MainActor [weak self] in self?.handle(state) }
+            }
+            self.tlsIdentity = identity
+            self.listener = listener
+            self.lastError = nil
+            listener.start(queue: self.queue)
+        } catch {
+            self.lastError = error.localizedDescription
+            DebugLogger.shared.error("Remote API failed to start: \(error.localizedDescription)", source: "RemoteAPIServer")
+        }
+    }
+
+    func stop() {
+        self.pairing.cancel()
+        self.connections.values.forEach { $0.cancel() }
+        self.connections.removeAll()
+        self.listener?.cancel()
+        self.listener = nil
+        self.isRunning = false
+    }
+
+    func beginPairing() throws -> RemoteAPI.PairingPayload {
+        guard self.isRunning, let identity = self.tlsIdentity else {
+            throw NSError(domain: "RemoteAPIServer", code: -2, userInfo: [NSLocalizedDescriptionKey: "Remote access is not running."])
+        }
+        guard let host = Self.localIPv4Address() else {
+            throw NSError(domain: "RemoteAPIServer", code: -3, userInfo: [NSLocalizedDescriptionKey: "No local network address is available."])
+        }
+        let secret = self.pairing.begin()
+        return RemoteAPI.PairingPayload(
+            version: 1,
+            baseURL: "https://\(host):\(self.port)",
+            instanceID: Self.instanceID,
+            pairingSecret: secret,
+            certificateSHA256: identity.fingerprint
+        )
+    }
+
+    func pairedDevices() -> [RemoteDevice] {
+        (try? self.store.allDevices()) ?? []
+    }
+
+    func cancelPairing() {
+        self.pairing.cancel()
+    }
+
+    func revoke(deviceID: String) throws {
+        try self.store.revoke(deviceID: deviceID)
+        self.objectWillChange.send()
+    }
+
+    private func accept(_ connection: NWConnection) {
+        let handler = RemoteAPIConnectionHandler(connection: connection, router: self.router)
+        let id = ObjectIdentifier(handler)
+        handler.onClose = { [weak self] in
+            Task { @MainActor [weak self] in self?.connections[id] = nil }
+        }
+        self.connections[id] = handler
+        handler.start(on: self.queue)
+    }
+
+    private func handle(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            self.isRunning = true
+            DebugLogger.shared.info("Remote API listening on HTTPS port \(self.port)", source: "RemoteAPIServer")
+        case let .failed(error):
+            self.lastError = error.localizedDescription
+            self.stop()
+        case .cancelled:
+            self.isRunning = false
+        default:
+            break
+        }
+    }
+
+    private static func dictate(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.DictateResponse {
+        let samples = try LocalAPIAudioDecoder.samples(fromAudioData: input.audio, suggestedExtension: "wav")
+        let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)
+        let raw = transcription.text
+        guard input.wantsEnhancement, DictationAIPostProcessingGate.isConfigured(for: .primary) else {
+            return RemoteAPI.DictateResponse(rawText: raw, finalText: raw)
+        }
+        do {
+            let enhanced = try await DictationPostProcessingService.shared.process(raw).text
+            return RemoteAPI.DictateResponse(rawText: raw, finalText: enhanced)
+        } catch {
+            return RemoteAPI.DictateResponse(
+                rawText: raw,
+                finalText: raw,
+                enhancementError: error.localizedDescription
+            )
+        }
+    }
+
+    private static var instanceID: String {
+        let key = "RemoteAPIInstanceID"
+        if let existing = UserDefaults.standard.string(forKey: key) { return existing }
+        let created = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(created, forKey: key)
+        return created
+    }
+
+    private nonisolated static func localIPv4Address() -> String? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let first = interfaces else { return nil }
+        defer { freeifaddrs(interfaces) }
+
+        var candidates: [(name: String, address: String)] = []
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let interface = pointer.pointee
+            guard let socketAddress = interface.ifa_addr,
+                  socketAddress.pointee.sa_family == UInt8(AF_INET),
+                  interface.ifa_flags & UInt32(IFF_UP) != 0,
+                  interface.ifa_flags & UInt32(IFF_LOOPBACK) == 0
+            else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                socketAddress,
+                socklen_t(socketAddress.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else { continue }
+            candidates.append((String(cString: interface.ifa_name), String(cString: host)))
+        }
+        let preferredNames = ["en0", "en1"]
+        return candidates.min { lhs, rhs in
+            (preferredNames.firstIndex(of: lhs.name) ?? preferredNames.count) <
+                (preferredNames.firstIndex(of: rhs.name) ?? preferredNames.count)
+        }?.address
+    }
+}
+
+@MainActor
+private final class RemoteAPIConnectionHandler {
+    private let connection: NWConnection
+    private let router: RemoteAPIRouter
+    private var buffer = Data()
+    private var closed = false
+    var onClose: (() -> Void)?
+
+    init(connection: NWConnection, router: RemoteAPIRouter) {
+        self.connection = connection
+        self.router = router
+    }
+
+    func start(on queue: DispatchQueue) {
+        self.connection.start(queue: queue)
+        self.receive()
+    }
+
+    func cancel() { self.close() }
+
+    private func receive() {
+        self.connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, complete, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if error != nil || complete { self.close(); return }
+                if let data { self.buffer.append(data) }
+                guard self.buffer.count <= RemoteAPI.maxRequestBytes else {
+                    self.send(RemoteAPI.error("Request too large.", status: 413)); return
+                }
+                switch self.parseRequest() {
+                case let .request(request): self.send(await self.router.route(request))
+                case let .failure(response): self.send(response)
+                case .incomplete: self.receive()
+                }
+            }
+        }
+    }
+
+    private enum ParseResult {
+        case incomplete
+        case request(RemoteAPI.Request)
+        case failure(RemoteAPI.Response)
+    }
+
+    private func parseRequest() -> ParseResult {
+        guard let headerEnd = self.buffer.range(of: Data("\r\n\r\n".utf8)) else { return .incomplete }
+        guard let text = String(data: self.buffer[..<headerEnd.lowerBound], encoding: .utf8) else {
+            return .failure(RemoteAPI.error("Malformed request.", status: 400))
+        }
+        let lines = text.components(separatedBy: "\r\n")
+        let requestLine = lines.first?.split(separator: " ").map(String.init) ?? []
+        guard requestLine.count >= 2 else { return .failure(RemoteAPI.error("Malformed request.", status: 400)) }
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            headers[String(line[..<separator]).lowercased()] = line[line.index(after: separator)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let rawLength = headers["content-length"], let length = Int(rawLength), length >= 0 else {
+            return .failure(RemoteAPI.error("Content-Length is required.", status: 411))
+        }
+        guard length <= RemoteAPI.maxRequestBytes else { return .failure(RemoteAPI.error("Request too large.", status: 413)) }
+        let bodyStart = headerEnd.upperBound
+        guard self.buffer.count >= bodyStart + length else { return .incomplete }
+        return .request(RemoteAPI.Request(
+            method: requestLine[0],
+            path: requestLine[1],
+            headers: headers,
+            body: Data(self.buffer[bodyStart..<(bodyStart + length)])
+        ))
+    }
+
+    private func send(_ response: RemoteAPI.Response) {
+        var headers = response.headers
+        headers["Content-Length"] = String(response.body.count)
+        headers["Connection"] = "close"
+        let reason = [200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 411: "Length Required", 413: "Payload Too Large", 500: "Internal Server Error"][response.status] ?? "Response"
+        var data = Data("HTTP/1.1 \(response.status) \(reason)\r\n".utf8)
+        for (key, value) in headers.sorted(by: { $0.key < $1.key }) { data.append(Data("\(key): \(value)\r\n".utf8)) }
+        data.append(Data("\r\n".utf8))
+        data.append(response.body)
+        self.connection.send(content: data, completion: .contentProcessed { [weak self] _ in
+            Task { @MainActor [weak self] in self?.close() }
+        })
+    }
+
+    private func close() {
+        guard !self.closed else { return }
+        self.closed = true
+        self.connection.cancel()
+        self.onClose?()
+    }
+}
