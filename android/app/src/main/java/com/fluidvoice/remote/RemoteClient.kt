@@ -10,11 +10,15 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import java.util.UUID
 
 class RemoteClient {
+    private val socketFactories = mutableMapOf<String, SSLSocketFactory>()
+    private val pinnedHostnameVerifier = HostnameVerifier { _, _ -> true }
+
     fun pair(payload: PairingPayload, deviceId: String, deviceName: String): CredentialStore.Connection {
         val startedAt = SystemClock.elapsedRealtime()
         Log.i(TAG, "REMOTE_BENCH phase=pair_start instance=${payload.instanceId}")
@@ -53,23 +57,29 @@ class RemoteClient {
         body: ByteArray,
         configure: HttpsURLConnection.() -> Unit,
     ): ByteArray {
-        val trustManager = PinnedTrustManager(fingerprint)
-        val sslContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf<TrustManager>(trustManager), SecureRandom())
-        }
         val connection = URL(baseUrl + path).openConnection() as HttpsURLConnection
-        connection.sslSocketFactory = sslContext.socketFactory
-        connection.hostnameVerifier = HostnameVerifier { _, _ -> true }
+        connection.sslSocketFactory = socketFactory(fingerprint)
+        connection.hostnameVerifier = pinnedHostnameVerifier
         connection.requestMethod = "POST"
         connection.connectTimeout = 10_000
         connection.readTimeout = 180_000
         connection.doOutput = true
+        connection.setFixedLengthStreamingMode(body.size)
         connection.configure()
         connection.outputStream.use { it.write(body) }
         val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
         val response = stream.use { it.readBytes() }
         check(connection.responseCode in 200..299) { JSONObject(String(response)).optString("error", "Request failed") }
         return response
+    }
+
+    private fun socketFactory(fingerprint: String): SSLSocketFactory = synchronized(socketFactories) {
+        socketFactories.getOrPut(fingerprint) {
+            val trustManager = PinnedTrustManager(fingerprint)
+            SSLContext.getInstance("TLS").apply {
+                init(null, arrayOf<TrustManager>(trustManager), SecureRandom())
+            }.socketFactory
+        }
     }
 
     private companion object {
