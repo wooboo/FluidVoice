@@ -2,13 +2,13 @@ package com.fluidvoice.remote
 
 sealed interface OverlayState {
     data object Idle : OverlayState
-    data object Recording : OverlayState
-    data object Processing : OverlayState
+    data class Recording(val mode: CaptureMode) : OverlayState
+    data class Processing(val mode: CaptureMode) : OverlayState
     data class Error(val message: String) : OverlayState
 }
 
 sealed interface OverlayAction {
-    data object Start : OverlayAction
+    data class Start(val mode: CaptureMode) : OverlayAction
     data object Confirm : OverlayAction
     data object Reject : OverlayAction
     data object Complete : OverlayAction
@@ -18,21 +18,20 @@ sealed interface OverlayAction {
 object OverlayReducer {
     fun reduce(state: OverlayState, action: OverlayAction): OverlayState = when (state) {
         OverlayState.Idle -> when (action) {
-            OverlayAction.Start -> OverlayState.Recording
+            is OverlayAction.Start -> OverlayState.Recording(action.mode)
             else -> state
         }
-        OverlayState.Recording -> when (action) {
-            OverlayAction.Confirm -> OverlayState.Processing
+        is OverlayState.Recording -> when (action) {
+            OverlayAction.Confirm -> OverlayState.Processing(state.mode)
             OverlayAction.Reject -> OverlayState.Idle
             else -> state
         }
-        OverlayState.Processing -> when (action) {
+        is OverlayState.Processing -> when (action) {
             OverlayAction.Complete -> OverlayState.Idle
             is OverlayAction.Fail -> OverlayState.Error(action.message)
             else -> state
         }
         is OverlayState.Error -> when (action) {
-            OverlayAction.Start -> OverlayState.Recording
             OverlayAction.Reject -> OverlayState.Idle
             else -> state
         }

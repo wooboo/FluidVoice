@@ -20,14 +20,22 @@ final class DictationPostProcessingService {
         let apiKey: String
     }
 
-    func process(_ inputText: String, dictationSlot: SettingsStore.DictationShortcutSlot = .primary) async throws -> Result {
+    func process(
+        _ inputText: String,
+        dictationSlot: SettingsStore.DictationShortcutSlot = .primary,
+        promptOverride: String? = nil
+    ) async throws -> Result {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return Result(text: "", providerID: SettingsStore.shared.selectedProviderID, model: "")
         }
 
         let settings = SettingsStore.shared
-        let resolved = self.resolveProvider(settings: settings, dictationSlot: dictationSlot)
+        let resolved = self.resolveProvider(
+            settings: settings,
+            dictationSlot: dictationSlot,
+            ignoresPrivateAISelection: promptOverride != nil
+        )
         guard !resolved.providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AIProcessingError.noVerifiedProvider
         }
@@ -36,7 +44,7 @@ final class DictationPostProcessingService {
             source: "DictationPostProcessingService"
         )
 
-        let usesPrivateAISelection = settings.dictationPromptSelection(for: dictationSlot) == .privateAI
+        let usesPrivateAISelection = promptOverride == nil && settings.dictationPromptSelection(for: dictationSlot) == .privateAI
         let isPrivateAIProvider = resolved.providerID == PrivateAIProviderFeature.shared.providerID ||
             resolved.providerKey == PrivateAIProviderFeature.shared.providerID ||
             resolved.providerKey == "custom:\(PrivateAIProviderFeature.shared.providerID)"
@@ -75,7 +83,8 @@ final class DictationPostProcessingService {
             )
         }
 
-        let promptText = settings.effectiveDictationSystemPrompt(for: dictationSlot, appBundleID: nil)
+        let promptText = promptOverride?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+            ?? settings.effectiveDictationSystemPrompt(for: dictationSlot, appBundleID: nil)
         let systemPrompt = ""
         let userMessageContent = SettingsStore.renderDictationUserMessage(
             promptText: promptText,
@@ -139,8 +148,13 @@ final class DictationPostProcessingService {
         )
     }
 
-    private func resolveProvider(settings: SettingsStore, dictationSlot: SettingsStore.DictationShortcutSlot) -> ResolvedProvider {
-        if settings.dictationPromptSelection(for: dictationSlot) == .privateAI,
+    private func resolveProvider(
+        settings: SettingsStore,
+        dictationSlot: SettingsStore.DictationShortcutSlot,
+        ignoresPrivateAISelection: Bool
+    ) -> ResolvedProvider {
+        if !ignoresPrivateAISelection,
+           settings.dictationPromptSelection(for: dictationSlot) == .privateAI,
            let modelID = PrivateAIProviderPromptFormat.verifiedModelID(settings: settings)
         {
             let providerID = PrivateAIProviderFeature.shared.providerID
@@ -186,4 +200,8 @@ final class DictationPostProcessingService {
             apiKey: providerKeys[providerID] ?? ""
         )
     }
+}
+
+private extension String {
+    var nonEmpty: String? { self.isEmpty ? nil : self }
 }

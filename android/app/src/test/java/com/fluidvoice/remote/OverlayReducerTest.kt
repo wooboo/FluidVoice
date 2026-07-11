@@ -5,35 +5,36 @@ import org.junit.Test
 
 class OverlayReducerTest {
     @Test
-    fun `tap starts recording and confirmation starts processing`() {
-        val recording = OverlayReducer.reduce(OverlayState.Idle, OverlayAction.Start)
+    fun `mode button starts its recording and confirmation starts processing`() {
+        val recording = OverlayReducer.reduce(OverlayState.Idle, OverlayAction.Start(CaptureMode.SmartNote))
         val processing = OverlayReducer.reduce(recording, OverlayAction.Confirm)
 
-        assertEquals(OverlayState.Recording, recording)
-        assertEquals(OverlayState.Processing, processing)
+        assertEquals(OverlayState.Recording(CaptureMode.SmartNote), recording)
+        assertEquals(OverlayState.Processing(CaptureMode.SmartNote), processing)
     }
 
     @Test
     fun `rejecting a recording returns to idle`() {
-        val state = OverlayReducer.reduce(OverlayState.Recording, OverlayAction.Reject)
+        val state = OverlayReducer.reduce(OverlayState.Recording(CaptureMode.Dictation), OverlayAction.Reject)
 
         assertEquals(OverlayState.Idle, state)
     }
 
     @Test
     fun `successful insertion returns to idle and failure remains visible`() {
-        assertEquals(OverlayState.Idle, OverlayReducer.reduce(OverlayState.Processing, OverlayAction.Complete))
+        val processing = OverlayState.Processing(CaptureMode.Dictation)
+        assertEquals(OverlayState.Idle, OverlayReducer.reduce(processing, OverlayAction.Complete))
         assertEquals(
             OverlayState.Error("Mac is unavailable"),
-            OverlayReducer.reduce(OverlayState.Processing, OverlayAction.Fail("Mac is unavailable")),
+            OverlayReducer.reduce(processing, OverlayAction.Fail("Mac is unavailable")),
         )
     }
 
     @Test
-    fun `tapping after an error retries recording`() {
+    fun `dismissing an error returns to idle`() {
         assertEquals(
-            OverlayState.Recording,
-            OverlayReducer.reduce(OverlayState.Error("Network failed"), OverlayAction.Start),
+            OverlayState.Idle,
+            OverlayReducer.reduce(OverlayState.Error("Network failed"), OverlayAction.Reject),
         )
     }
 }

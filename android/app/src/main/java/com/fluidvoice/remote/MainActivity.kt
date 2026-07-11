@@ -2,105 +2,108 @@ package com.fluidvoice.remote
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.Switch
-import android.widget.TextView
 import android.util.Log
+import android.view.accessibility.AccessibilityManager
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import kotlin.concurrent.thread
 
-class MainActivity : Activity() {
-    private lateinit var status: TextView
-    private lateinit var result: TextView
-    private lateinit var record: Button
-    private lateinit var enhancement: Switch
-    private lateinit var overlayButton: Button
-    private lateinit var accessibilityButton: Button
+class MainActivity : ComponentActivity() {
     private lateinit var store: CredentialStore
     private val client = RemoteClient()
     private val recorder by lazy { CompressedAudioRecorder(this) }
-    private var isRecording = false
+    private val handler = Handler(Looper.getMainLooper())
+    private var uiState by mutableStateOf(AppUiState())
     private var preconnectThread: Thread? = null
+    private var microphonePermissionPurpose: MicrophonePermissionPurpose? = null
+
+    private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) return@registerForActivityResult
+        when (microphonePermissionPurpose.also { microphonePermissionPurpose = null }) {
+            MicrophonePermissionPurpose.DirectCapture -> startCapture()
+            MicrophonePermissionPurpose.Overlay -> startOverlayIfReady()
+            null -> Unit
+        }
+    }
+
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    private val levelSampler = object : Runnable {
+        override fun run() {
+            if (!uiState.isRecording) return
+            uiState = uiState.copy(audioLevel = AudioLevelMapper.normalize(recorder.maxAmplitude()))
+            handler.postDelayed(this, 70)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = CredentialStore(this)
-        setContentView(buildView())
-        updateConnectionStatus()
+        refreshSystemState()
+        setContent {
+            FluidVoiceTheme {
+                FluidVoiceApp(
+                    state = uiState,
+                    actions = AppActions(
+                        selectSection = { uiState = uiState.copy(section = it, selectedNote = null) },
+                        refreshNotes = ::refreshNotes,
+                        openNote = { uiState = uiState.copy(selectedNote = it) },
+                        requestDeleteNote = { uiState = uiState.copy(notePendingDeletion = it, noteDeleteError = null) },
+                        dismissDeleteNote = {
+                            if (!uiState.isDeletingNote) {
+                                uiState = uiState.copy(notePendingDeletion = null, noteDeleteError = null)
+                            }
+                        },
+                        confirmDeleteNote = ::deletePendingNote,
+                        setCaptureMode = { uiState = uiState.copy(captureMode = it, captureMessage = null) },
+                        startCapture = ::startCapture,
+                        confirmCapture = ::confirmCapture,
+                        rejectCapture = ::rejectCapture,
+                        scanPairingCode = ::scanPairingCode,
+                        setDictationEnhancement = ::setDictationEnhancement,
+                        setNotesEnhancement = ::setNotesEnhancement,
+                        toggleOverlay = ::toggleOverlay,
+                        openAccessibilitySettings = {
+                            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        },
+                    ),
+                )
+            }
+        }
+        refreshNotes()
         restoreOverlayIfReady()
     }
 
     override fun onResume() {
         super.onResume()
-        if (::overlayButton.isInitialized) updateOverlayControls()
-        restoreOverlayIfReady()
+        if (::store.isInitialized) {
+            refreshSystemState()
+            refreshNotes()
+            restoreOverlayIfReady()
+        }
     }
 
-    private fun buildView(): LinearLayout {
-        val padding = (24 * resources.displayMetrics.density).toInt()
-        status = TextView(this).apply { textSize = 16f }
-        result = TextView(this).apply {
-            textSize = 24f
-            setTextColor(Color.rgb(40, 35, 30))
-        }
-        val pair = Button(this).apply {
-            text = "Scan pairing QR"
-            setOnClickListener { scanPairingCode() }
-        }
-        record = Button(this).apply {
-            text = "Start dictation"
-            isEnabled = store.load() != null
-            setOnClickListener { toggleRecording() }
-        }
-        enhancement = Switch(this).apply {
-            text = "AI enhancement"
-            isChecked = RemotePreferences.isAiEnhancementEnabled(this@MainActivity)
-            setOnCheckedChangeListener { _, enabled ->
-                RemotePreferences.setAiEnhancementEnabled(this@MainActivity, enabled)
-                updateConnectionStatus()
-            }
-        }
-        accessibilityButton = Button(this).apply {
-            setOnClickListener {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            }
-        }
-        overlayButton = Button(this).apply {
-            setOnClickListener { toggleOverlay() }
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(padding, padding * 2, padding, padding)
-            addView(TextView(context).apply { text = "FluidVoice Remote"; textSize = 32f })
-            addView(status, ViewGroup.LayoutParams(-1, -2))
-            addView(pair, ViewGroup.LayoutParams(-1, -2))
-            addView(enhancement, ViewGroup.LayoutParams(-1, -2))
-            addView(record, ViewGroup.LayoutParams(-1, -2))
-            addView(TextView(context).apply {
-                text = "Use FluidVoice inside other apps"
-                textSize = 18f
-                setPadding(0, padding, 0, 0)
-            }, ViewGroup.LayoutParams(-1, -2))
-            addView(accessibilityButton, ViewGroup.LayoutParams(-1, -2))
-            addView(overlayButton, ViewGroup.LayoutParams(-1, -2))
-            addView(result, ViewGroup.LayoutParams(-1, -2))
-        }
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        if (uiState.isRecording) runCatching { recorder.stop() }
+        super.onDestroy()
     }
 
     private fun scanPairingCode() {
@@ -114,97 +117,172 @@ class MainActivity : Activity() {
     }
 
     private fun pair(rawPayload: String) {
-        status.text = "Pairing..."
-        thread {
+        uiState = uiState.copy(connectionMessage = "Pairing with your Mac...")
+        thread(name = "fluidvoice-pair") {
             runCatching {
                 val payload = PairingPayload.parse(rawPayload)
-                val connection = client.pair(
+                client.pair(
                     payload,
                     Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID),
-                    android.os.Build.MODEL,
-                )
-                store.save(connection)
-            }.onSuccess { runOnUiThread { updateConnectionStatus() } }
-                .onFailure { runOnUiThread { showError(it) } }
+                    Build.MODEL,
+                ).also(store::save)
+            }.onSuccess {
+                runOnUiThread {
+                    refreshSystemState()
+                    refreshNotes()
+                    restoreOverlayIfReady()
+                }
+            }.onFailure { runOnUiThread { showError(it) } }
         }
     }
 
-    private fun toggleRecording() {
-        if (!isRecording && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_DIRECT_MICROPHONE)
+    private fun refreshNotes() {
+        val connection = store.load()
+        if (connection == null) {
+            uiState = uiState.copy(notes = emptyList(), notesLoading = false, notesError = null)
             return
         }
-        if (!isRecording) {
-            runCatching { recorder.start() }.onFailure {
-                showError(it)
-                return
+        uiState = uiState.copy(notesLoading = true, notesError = null)
+        thread(name = "fluidvoice-notes-refresh") {
+            runCatching { client.listNotes(connection) }
+                .onSuccess { notes ->
+                    runOnUiThread {
+                        uiState = uiState.copy(notes = notes, notesLoading = false, notesError = null)
+                    }
+                }
+                .onFailure { error ->
+                    runOnUiThread {
+                        uiState = uiState.copy(notesLoading = false, notesError = error.message ?: "Connection failed")
+                    }
+                }
+        }
+    }
+
+    private fun deletePendingNote() {
+        val note = uiState.notePendingDeletion ?: return
+        val connection = store.load() ?: run {
+            uiState = uiState.copy(noteDeleteError = "Pair with your Mac first")
+            return
+        }
+        uiState = uiState.copy(isDeletingNote = true, noteDeleteError = null)
+        thread(name = "fluidvoice-note-delete") {
+            runCatching { client.deleteNote(connection, note.id) }
+                .onSuccess {
+                    runOnUiThread {
+                        uiState = uiState.copy(
+                            notes = uiState.notes.filterNot { it.id == note.id },
+                            selectedNote = null,
+                            notePendingDeletion = null,
+                            isDeletingNote = false,
+                            noteDeleteError = null,
+                        )
+                        refreshNotes()
+                    }
+                }
+                .onFailure { error ->
+                    runOnUiThread {
+                        uiState = uiState.copy(
+                            isDeletingNote = false,
+                            noteDeleteError = error.message ?: "Unable to delete note",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun startCapture() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            microphonePermissionPurpose = MicrophonePermissionPurpose.DirectCapture
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        runCatching { recorder.start() }
+            .onSuccess {
+                uiState = uiState.copy(isRecording = true, audioLevel = 0f, captureMessage = null)
+                preconnectThread = store.load()?.let { startPreconnect(it, "capture") }
+                handler.post(levelSampler)
             }
-            isRecording = true
-            preconnectThread = store.load()?.let { startPreconnect(it, "direct") }
-            record.text = "Stop and transcribe"
-            status.text = "Listening..."
-            return
-        }
-        isRecording = false
-        record.isEnabled = false
-        record.text = "Transcribing..."
-        val stopStartedAt = SystemClock.elapsedRealtime()
+            .onFailure(::showError)
+    }
+
+    private fun rejectCapture() {
+        if (!uiState.isRecording) return
+        handler.removeCallbacks(levelSampler)
+        runCatching { recorder.stop() }
+        preconnectThread = null
+        uiState = uiState.copy(isRecording = false, audioLevel = 0f, captureMessage = "Recording discarded")
+    }
+
+    private fun confirmCapture() {
+        if (!uiState.isRecording) return
+        handler.removeCallbacks(levelSampler)
         val audio = runCatching { recorder.stop() }.getOrElse {
             showError(it)
-            resetRecordButton()
             return
         }
-        Log.i(
-            "FluidVoiceRemote",
-            "REMOTE_BENCH phase=recording_stopped elapsedMs=${SystemClock.elapsedRealtime() - stopStartedAt} bytes=${audio.size} format=m4a",
-        )
-        val connection = store.load() ?: return
-        val enhance = enhancement.isChecked
+        val connection = store.load() ?: run {
+            showError(IllegalStateException("Pair with your Mac first"))
+            return
+        }
+        val mode = uiState.captureMode
         val preparation = preconnectThread.also { preconnectThread = null }
-        thread {
+        uiState = uiState.copy(isRecording = false, isProcessing = true, audioLevel = 0f, captureMessage = null)
+        Log.i(TAG, "REMOTE_BENCH phase=capture_stopped bytes=${audio.size} format=m4a mode=$mode")
+        thread(name = "fluidvoice-capture") {
             preparation?.join(PRECONNECT_WAIT_MS)
-            runCatching { client.dictate(connection, audio, enhance) }
-                .onSuccess { text -> runOnUiThread { result.text = text; resetRecordButton() } }
-                .onFailure { runOnUiThread { showError(it); resetRecordButton() } }
+            runCatching {
+                when (mode) {
+                    CaptureMode.Dictation -> CaptureResult.Dictation(
+                        client.dictate(connection, audio, RemotePreferences.isAiEnhancementEnabled(this)),
+                    )
+                    CaptureMode.SmartNote -> CaptureResult.Note(
+                        client.captureNote(connection, audio, RemotePreferences.isSmartNotesEnhancementEnabled(this)),
+                    )
+                }
+            }.onSuccess { result -> runOnUiThread { finishCapture(result) } }
+                .onFailure { error -> runOnUiThread { showError(error) } }
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_DIRECT_MICROPHONE && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            toggleRecording()
-        }
-        if (requestCode == REQUEST_OVERLAY_MICROPHONE && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            startOverlayIfReady()
+    private fun finishCapture(result: CaptureResult) {
+        when (result) {
+            is CaptureResult.Dictation -> {
+                uiState = uiState.copy(isProcessing = false, captureMessage = result.text)
+            }
+            is CaptureResult.Note -> {
+                result.capture.enhancementError?.let { error ->
+                    Toast.makeText(
+                        this,
+                        "Note saved without AI: ${error.take(160)}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                uiState = uiState.copy(
+                    isProcessing = false,
+                    section = AppSection.Notes,
+                    captureMessage = null,
+                    selectedNote = result.capture.note,
+                )
+                refreshNotes()
+            }
         }
     }
 
-    private fun updateConnectionStatus() {
-        val connected = store.load() != null
-        status.text = when {
-            !connected -> "Pair with FluidVoice on your Mac"
-            enhancement.isChecked -> "Paired - AI enhancement on"
-            else -> "Paired - Fast transcription"
-        }
-        record.isEnabled = connected
-        updateOverlayControls()
+    private fun setDictationEnhancement(enabled: Boolean) {
+        RemotePreferences.setAiEnhancementEnabled(this, enabled)
+        uiState = uiState.copy(dictationEnhancement = enabled)
     }
 
-    private fun resetRecordButton() {
-        updateConnectionStatus()
-        record.text = "Start dictation"
-        record.isEnabled = true
-    }
-
-    private fun showError(error: Throwable) {
-        status.text = error.message ?: "Operation failed"
+    private fun setNotesEnhancement(enabled: Boolean) {
+        RemotePreferences.setSmartNotesEnhancementEnabled(this, enabled)
+        uiState = uiState.copy(notesEnhancement = enabled)
     }
 
     private fun toggleOverlay() {
         if (OverlayService.isRunning) {
             RemotePreferences.setOverlayEnabled(this, false)
             stopService(Intent(this, OverlayService::class.java))
-            updateOverlayControls()
+            handler.postDelayed(::refreshSystemState, 200)
             return
         }
         startOverlayIfReady()
@@ -212,49 +290,48 @@ class MainActivity : Activity() {
 
     private fun startOverlayIfReady() {
         if (store.load() == null) {
-            status.text = "Pair with your Mac before enabling the overlay"
+            showError(IllegalStateException("Pair with your Mac before enabling the overlay"))
             return
         }
         RemotePreferences.setOverlayEnabled(this, true)
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_OVERLAY_MICROPHONE)
+            microphonePermissionPurpose = MicrophonePermissionPurpose.Overlay
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
         if (!Settings.canDrawOverlays(this)) {
-            startActivity(Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName"),
-            ))
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             return
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         startForegroundService(Intent(this, OverlayService::class.java))
-        overlayButton.postDelayed({ updateOverlayControls() }, 300)
+        handler.postDelayed(::refreshSystemState, 300)
     }
 
-    private fun updateOverlayControls() {
-        if (!::overlayButton.isInitialized) return
-        accessibilityButton.text = if (isAccessibilityEnabled()) {
-            "Text insertion enabled"
-        } else {
-            "Enable text insertion"
-        }
-        overlayButton.text = when {
-            OverlayService.isRunning -> "Hide FluidVoice overlay"
-            !Settings.canDrawOverlays(this) -> "Allow display over other apps"
-            else -> "Show FluidVoice overlay"
-        }
-        overlayButton.isEnabled = store.load() != null
+    private fun refreshSystemState() {
+        val paired = store.load() != null
+        uiState = uiState.copy(
+            isPaired = paired,
+            connectionMessage = if (paired) "Ready on your local network" else "Pair with FluidVoice on your Mac",
+            dictationEnhancement = RemotePreferences.isAiEnhancementEnabled(this),
+            notesEnhancement = RemotePreferences.isSmartNotesEnhancementEnabled(this),
+            overlayRunning = OverlayService.isRunning,
+            canDrawOverlays = Settings.canDrawOverlays(this),
+            accessibilityEnabled = isAccessibilityEnabled(),
+        )
     }
 
     private fun isAccessibilityEnabled(): Boolean {
         val manager = getSystemService(ACCESSIBILITY_SERVICE) as AccessibilityManager
         return manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-            .any { it.resolveInfo.serviceInfo.packageName == packageName && it.resolveInfo.serviceInfo.name == FluidAccessibilityService::class.java.name }
+            .any {
+                it.resolveInfo.serviceInfo.packageName == packageName &&
+                    it.resolveInfo.serviceInfo.name == FluidAccessibilityService::class.java.name
+            }
     }
 
     private fun restoreOverlayIfReady() {
@@ -262,6 +339,7 @@ class MainActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
         if (!Settings.canDrawOverlays(this)) return
         runCatching { startForegroundService(Intent(this, OverlayService::class.java)) }
+            .onSuccess { handler.postDelayed(::refreshSystemState, 300) }
             .onFailure { Log.w(TAG, "Unable to restore overlay", it) }
     }
 
@@ -271,10 +349,24 @@ class MainActivity : Activity() {
                 .onFailure { Log.i(TAG, "REMOTE_BENCH phase=preconnect_failed source=$source error=${it.message}") }
         }
 
+    private fun showError(error: Throwable) {
+        uiState = uiState.copy(
+            isRecording = false,
+            isProcessing = false,
+            audioLevel = 0f,
+            captureMessage = "Error: ${error.message ?: "Operation failed"}",
+            connectionMessage = error.message ?: uiState.connectionMessage,
+        )
+    }
+
+    private sealed interface CaptureResult {
+        data class Dictation(val text: String) : CaptureResult
+        data class Note(val capture: SmartNoteCapture) : CaptureResult
+    }
+
+    private enum class MicrophonePermissionPurpose { DirectCapture, Overlay }
+
     companion object {
-        private const val REQUEST_DIRECT_MICROPHONE = 10
-        private const val REQUEST_OVERLAY_MICROPHONE = 11
-        private const val REQUEST_NOTIFICATIONS = 12
         private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
     }

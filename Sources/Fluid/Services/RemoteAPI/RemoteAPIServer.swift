@@ -14,13 +14,23 @@ final class RemoteAPIServer: ObservableObject {
     private let queue = DispatchQueue(label: "fluidvoice.remote-api", qos: .utility)
     private let store = RemoteDeviceKeychainStore()
     private lazy var pairing = RemotePairingCoordinator(store: self.store)
-    private lazy var router = RemoteAPIRouter(pairing: self.pairing, dictate: Self.dictate)
+    private lazy var router = RemoteAPIRouter(
+        pairing: self.pairing,
+        dictate: Self.dictate,
+        captureNote: Self.captureNote,
+        listNotes: { SmartNoteCaptureService.shared.notes() },
+        deleteNote: { try SmartNoteCaptureService.shared.delete(id: $0) }
+    )
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: RemoteAPIConnectionHandler] = [:]
     private var tlsIdentity: RemoteTLSIdentity?
+    private var retryTask: Task<Void, Never>?
+    private let configuredPort: UInt16
+    private let isEnabledProvider: () -> Bool
+    private let retryDelayNanoseconds: UInt64
 
     var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "RemoteAPIEnabled") }
+        get { self.isEnabledProvider() }
         set {
             UserDefaults.standard.set(newValue, forKey: "RemoteAPIEnabled")
             newValue ? self.start() : self.stop()
@@ -28,12 +38,24 @@ final class RemoteAPIServer: ObservableObject {
         }
     }
 
-    var port: UInt16 { RemoteAPI.defaultPort }
+    var port: UInt16 { self.configuredPort }
 
-    private init() {}
+    private init() {
+        self.configuredPort = RemoteAPI.defaultPort
+        self.isEnabledProvider = { UserDefaults.standard.bool(forKey: "RemoteAPIEnabled") }
+        self.retryDelayNanoseconds = 1_000_000_000
+    }
+
+    init(port: UInt16, retryDelayNanoseconds: UInt64, isEnabled: @escaping () -> Bool) {
+        self.configuredPort = port
+        self.isEnabledProvider = isEnabled
+        self.retryDelayNanoseconds = retryDelayNanoseconds
+    }
 
     func start() {
         guard self.isEnabled, self.listener == nil else { return }
+        self.retryTask?.cancel()
+        self.retryTask = nil
         do {
             let identity = try RemoteTLSIdentityStore.loadOrCreate()
             let tls = NWProtocolTLS.Options()
@@ -51,8 +73,11 @@ final class RemoteAPIServer: ObservableObject {
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor [weak self] in self?.accept(connection) }
             }
-            listener.stateUpdateHandler = { [weak self] state in
-                Task { @MainActor [weak self] in self?.handle(state) }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                Task { @MainActor [weak self, weak listener] in
+                    guard let self, let listener, self.listener === listener else { return }
+                    self.handle(state)
+                }
             }
             self.tlsIdentity = identity
             self.listener = listener
@@ -65,9 +90,12 @@ final class RemoteAPIServer: ObservableObject {
     }
 
     func stop() {
+        self.retryTask?.cancel()
+        self.retryTask = nil
         self.pairing.cancel()
         self.connections.values.forEach { $0.cancel() }
         self.connections.removeAll()
+        self.listener?.stateUpdateHandler = nil
         self.listener?.cancel()
         self.listener = nil
         self.isRunning = false
@@ -117,14 +145,47 @@ final class RemoteAPIServer: ObservableObject {
         switch state {
         case .ready:
             self.isRunning = true
+            self.lastError = nil
             DebugLogger.shared.info("Remote API listening on HTTPS port \(self.port)", source: "RemoteAPIServer")
+        case let .waiting(error):
+            self.recoverListener(after: error)
         case let .failed(error):
-            self.lastError = error.localizedDescription
-            self.stop()
+            self.recoverListener(after: error)
         case .cancelled:
             self.isRunning = false
         default:
             break
+        }
+    }
+
+    private func recoverListener(after error: NWError) {
+        self.lastError = error.localizedDescription
+        self.isRunning = false
+        self.connections.values.forEach { $0.cancel() }
+        self.connections.removeAll()
+        self.listener?.stateUpdateHandler = nil
+        self.listener?.cancel()
+        self.listener = nil
+
+        guard self.isEnabled else { return }
+        DebugLogger.shared.warning(
+            "Remote API listener unavailable; retrying: \(error.localizedDescription)",
+            source: "RemoteAPIServer"
+        )
+        self.scheduleRetry()
+    }
+
+    private func scheduleRetry() {
+        self.retryTask?.cancel()
+        self.retryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: self.retryDelayNanoseconds)
+            } catch {
+                return
+            }
+            self.retryTask = nil
+            self.start()
         }
     }
 
@@ -167,6 +228,29 @@ final class RemoteAPIServer: ObservableObject {
                 enhancementError: error.localizedDescription
             )
         }
+    }
+
+    private static func captureNote(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.SmartNoteCaptureResponse {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.log(input.requestID, "note_pipeline_start bytes=\(input.audio.count) format=\(input.audioFileExtension)")
+        let samples = try LocalAPIAudioDecoder.samples(
+            fromAudioData: input.audio,
+            suggestedExtension: input.audioFileExtension
+        )
+        let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)
+        Self.log(
+            input.requestID,
+            "note_asr_done elapsedMs=\(Self.milliseconds(from: startedAt)) chars=\(transcription.text.count)"
+        )
+        let response = try await SmartNoteCaptureService.shared.capture(
+            rawText: transcription.text,
+            enhance: input.wantsEnhancement
+        )
+        Self.log(
+            input.requestID,
+            "note_pipeline_done enhanced=\(response.note.isAIEnhanced) totalMs=\(Self.milliseconds(from: startedAt))"
+        )
+        return response
     }
 
     private static func milliseconds(from start: TimeInterval, to end: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int {
@@ -294,7 +378,13 @@ private final class RemoteAPIConnectionHandler {
             headers[String(line[..<separator]).lowercased()] = line[line.index(after: separator)...]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard let rawLength = headers["content-length"], let length = Int(rawLength), length >= 0 else {
+        let method = requestLine[0].uppercased()
+        let length: Int
+        if let rawLength = headers["content-length"], let parsedLength = Int(rawLength), parsedLength >= 0 {
+            length = parsedLength
+        } else if method == "GET" || method == "HEAD" || method == "DELETE" {
+            length = 0
+        } else {
             return .failure(RemoteAPI.error("Content-Length is required.", status: 411))
         }
         guard length <= RemoteAPI.maxRequestBytes else { return .failure(RemoteAPI.error("Request too large.", status: 413)) }
