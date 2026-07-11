@@ -28,6 +28,7 @@ final class RemoteAPIServer: ObservableObject {
     private let configuredPort: UInt16
     private let isEnabledProvider: () -> Bool
     private let retryDelayNanoseconds: UInt64
+    private let maxRequestBytes: Int
 
     var isEnabled: Bool {
         get { self.isEnabledProvider() }
@@ -44,12 +45,19 @@ final class RemoteAPIServer: ObservableObject {
         self.configuredPort = RemoteAPI.defaultPort
         self.isEnabledProvider = { UserDefaults.standard.bool(forKey: "RemoteAPIEnabled") }
         self.retryDelayNanoseconds = 1_000_000_000
+        self.maxRequestBytes = RemoteAPI.maxRequestBytes
     }
 
-    init(port: UInt16, retryDelayNanoseconds: UInt64, isEnabled: @escaping () -> Bool) {
+    init(
+        port: UInt16,
+        retryDelayNanoseconds: UInt64,
+        maxRequestBytes: Int = RemoteAPI.maxRequestBytes,
+        isEnabled: @escaping () -> Bool
+    ) {
         self.configuredPort = port
         self.isEnabledProvider = isEnabled
         self.retryDelayNanoseconds = retryDelayNanoseconds
+        self.maxRequestBytes = maxRequestBytes
     }
 
     func start() {
@@ -132,7 +140,11 @@ final class RemoteAPIServer: ObservableObject {
     }
 
     private func accept(_ connection: NWConnection) {
-        let handler = RemoteAPIConnectionHandler(connection: connection, router: self.router)
+        let handler = RemoteAPIConnectionHandler(
+            connection: connection,
+            router: self.router,
+            maxRequestBytes: self.maxRequestBytes
+        )
         let id = ObjectIdentifier(handler)
         handler.onClose = { [weak self] in
             Task { @MainActor [weak self] in self?.connections[id] = nil }
@@ -306,6 +318,7 @@ final class RemoteAPIServer: ObservableObject {
 private final class RemoteAPIConnectionHandler {
     private let connection: NWConnection
     private let router: RemoteAPIRouter
+    private let maxRequestBytes: Int
     private var buffer = Data()
     private var closed = false
     private var requestStartedAt: TimeInterval?
@@ -314,9 +327,10 @@ private final class RemoteAPIConnectionHandler {
     private var idleTimeoutTask: Task<Void, Never>?
     var onClose: (() -> Void)?
 
-    init(connection: NWConnection, router: RemoteAPIRouter) {
+    init(connection: NWConnection, router: RemoteAPIRouter, maxRequestBytes: Int) {
         self.connection = connection
         self.router = router
+        self.maxRequestBytes = maxRequestBytes
     }
 
     func start(on queue: DispatchQueue) {
@@ -337,8 +351,10 @@ private final class RemoteAPIConnectionHandler {
                     if self.requestStartedAt == nil { self.requestStartedAt = ProcessInfo.processInfo.systemUptime }
                     self.buffer.append(data)
                 }
-                guard self.buffer.count <= RemoteAPI.maxRequestBytes else {
-                    self.send(RemoteAPI.error("Request too large.", status: 413)); return
+                guard self.buffer.count <= self.maxRequestBytes else {
+                    self.buffer = Data()
+                    self.send(RemoteAPI.error("Request too large.", status: 413), closeAfterResponse: true)
+                    return
                 }
                 switch self.parseRequest() {
                 case let .request(request):
@@ -349,7 +365,9 @@ private final class RemoteAPIConnectionHandler {
                         "request_received bytes=\(request.body.count) uploadMs=\(Self.milliseconds(since: request.receivedAt)) connectionRequest=\(self.requestCount)"
                     )
                     self.send(await self.router.route(request))
-                case let .failure(response): self.send(response)
+                case let .failure(response):
+                    self.buffer = Data()
+                    self.send(response, closeAfterResponse: true)
                 case .incomplete:
                     self.armIdleTimeout()
                     self.receive()
@@ -387,7 +405,7 @@ private final class RemoteAPIConnectionHandler {
         } else {
             return .failure(RemoteAPI.error("Content-Length is required.", status: 411))
         }
-        guard length <= RemoteAPI.maxRequestBytes else { return .failure(RemoteAPI.error("Request too large.", status: 413)) }
+        guard length <= self.maxRequestBytes else { return .failure(RemoteAPI.error("Request too large.", status: 413)) }
         let bodyStart = headerEnd.upperBound
         guard self.buffer.count >= bodyStart + length else { return .incomplete }
         let body = Data(self.buffer[bodyStart..<(bodyStart + length)])
@@ -402,9 +420,9 @@ private final class RemoteAPIConnectionHandler {
         ))
     }
 
-    private func send(_ response: RemoteAPI.Response) {
+    private func send(_ response: RemoteAPI.Response, closeAfterResponse: Bool = false) {
         let requestStartedAt = self.requestStartedAt ?? ProcessInfo.processInfo.systemUptime
-        let shouldKeepAlive = self.requestCount < 20
+        let shouldKeepAlive = !closeAfterResponse && self.requestCount < 20
         if let requestID = self.activeRequestID {
             Self.log(
                 requestID,
