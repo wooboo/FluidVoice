@@ -9,14 +9,22 @@ enum RemoteAPI {
         let path: String
         let headers: [String: String]
         let body: Data
+        let receivedAt: TimeInterval
 
-        init(method: String, path: String, headers: [String: String] = [:], body: Data = Data()) {
+        init(
+            method: String,
+            path: String,
+            headers: [String: String] = [:],
+            body: Data = Data(),
+            receivedAt: TimeInterval = ProcessInfo.processInfo.systemUptime
+        ) {
             self.method = method.uppercased()
             self.path = path
             self.headers = headers.reduce(into: [:]) { result, item in
                 result[item.key.lowercased()] = item.value
             }
             self.body = body
+            self.receivedAt = receivedAt
         }
     }
 
@@ -58,7 +66,9 @@ enum RemoteAPI {
 
     struct DictateInput {
         let audio: Data
+        let audioFileExtension: String
         let wantsEnhancement: Bool
+        let requestID: String
     }
 
     private struct ErrorResponse: Encodable {

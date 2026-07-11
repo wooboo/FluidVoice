@@ -1,5 +1,7 @@
 package com.fluidvoice.remote
 
+import android.os.SystemClock
+import android.util.Log
 import org.json.JSONObject
 import java.net.URL
 import java.security.MessageDigest
@@ -8,11 +10,18 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import java.util.UUID
 
 class RemoteClient {
+    private val socketFactories = mutableMapOf<String, SSLSocketFactory>()
+    private val pinnedHostnameVerifier = HostnameVerifier { _, _ -> true }
+
     fun pair(payload: PairingPayload, deviceId: String, deviceName: String): CredentialStore.Connection {
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "REMOTE_BENCH phase=pair_start instance=${payload.instanceId}")
         val body = JSONObject()
             .put("deviceID", deviceId)
             .put("deviceName", deviceName)
@@ -23,15 +32,21 @@ class RemoteClient {
             setRequestProperty("Content-Type", "application/json")
         }
         val credential = JSONObject(String(response)).getString("credential")
+        Log.i(TAG, "REMOTE_BENCH phase=pair_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
         return CredentialStore.Connection(payload.instanceId, payload.baseUrl, payload.certificateSha256, credential)
     }
 
-    fun dictate(connection: CredentialStore.Connection, wav: ByteArray): String {
-        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/dictate", wav) {
-            setRequestProperty("Content-Type", "audio/wav")
+    fun dictate(connection: CredentialStore.Connection, audio: ByteArray, enhance: Boolean): String {
+        val requestId = UUID.randomUUID().toString()
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_start bytes=${audio.size} format=m4a enhance=$enhance")
+        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/dictate", audio) {
+            setRequestProperty("Content-Type", "audio/mp4")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
-            setRequestProperty("X-FluidVoice-Enhance", "true")
+            setRequestProperty("X-FluidVoice-Enhance", enhance.toString())
+            setRequestProperty("X-Request-ID", requestId)
         }
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt} bytes=${response.size}")
         return JSONObject(String(response)).getString("finalText")
     }
 
@@ -42,23 +57,33 @@ class RemoteClient {
         body: ByteArray,
         configure: HttpsURLConnection.() -> Unit,
     ): ByteArray {
-        val trustManager = PinnedTrustManager(fingerprint)
-        val sslContext = SSLContext.getInstance("TLS").apply {
-            init(null, arrayOf<TrustManager>(trustManager), SecureRandom())
-        }
         val connection = URL(baseUrl + path).openConnection() as HttpsURLConnection
-        connection.sslSocketFactory = sslContext.socketFactory
-        connection.hostnameVerifier = HostnameVerifier { _, _ -> true }
+        connection.sslSocketFactory = socketFactory(fingerprint)
+        connection.hostnameVerifier = pinnedHostnameVerifier
         connection.requestMethod = "POST"
         connection.connectTimeout = 10_000
         connection.readTimeout = 180_000
         connection.doOutput = true
+        connection.setFixedLengthStreamingMode(body.size)
         connection.configure()
         connection.outputStream.use { it.write(body) }
         val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
         val response = stream.use { it.readBytes() }
         check(connection.responseCode in 200..299) { JSONObject(String(response)).optString("error", "Request failed") }
         return response
+    }
+
+    private fun socketFactory(fingerprint: String): SSLSocketFactory = synchronized(socketFactories) {
+        socketFactories.getOrPut(fingerprint) {
+            val trustManager = PinnedTrustManager(fingerprint)
+            SSLContext.getInstance("TLS").apply {
+                init(null, arrayOf<TrustManager>(trustManager), SecureRandom())
+            }.socketFactory
+        }
+    }
+
+    private companion object {
+        const val TAG = "FluidVoiceRemote"
     }
 }
 

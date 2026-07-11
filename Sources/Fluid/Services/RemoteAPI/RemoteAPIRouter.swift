@@ -40,20 +40,27 @@ final class RemoteAPIRouter {
     }
 
     private func handleDictate(_ request: RemoteAPI.Request) async -> RemoteAPI.Response {
+        let requestID = Self.requestID(from: request)
         guard let credential = Self.bearerCredential(from: request), self.pairing.authorizes(credential) else {
+            Self.log(requestID, "auth_rejected")
             return RemoteAPI.error("Unauthorized.", status: 401)
         }
         guard !request.body.isEmpty else {
+            Self.log(requestID, "empty_audio")
             return RemoteAPI.error("Missing audio body.", status: 400)
         }
 
         do {
             let wantsEnhancement = request.headers["x-fluidvoice-enhance"]?.lowercased() != "false"
+            Self.log(requestID, "dispatch bytes=\(request.body.count) enhance=\(wantsEnhancement)")
             return RemoteAPI.json(try await self.dictate(.init(
                 audio: request.body,
-                wantsEnhancement: wantsEnhancement
+                audioFileExtension: Self.audioFileExtension(from: request),
+                wantsEnhancement: wantsEnhancement,
+                requestID: requestID
             )))
         } catch {
+            Self.log(requestID, "failed error=\(error.localizedDescription)")
             return RemoteAPI.error(error.localizedDescription, status: 400)
         }
     }
@@ -63,5 +70,21 @@ final class RemoteAPIRouter {
         let parts = authorization.split(separator: " ", maxSplits: 1).map(String.init)
         guard parts.count == 2, parts[0].caseInsensitiveCompare("Bearer") == .orderedSame else { return nil }
         return parts[1]
+    }
+
+    static func requestID(from request: RemoteAPI.Request) -> String {
+        let candidate = request.headers["x-request-id"] ?? UUID().uuidString.lowercased()
+        let allowed = candidate.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        return allowed.isEmpty ? UUID().uuidString.lowercased() : String(allowed.prefix(64))
+    }
+
+    private static func log(_ requestID: String, _ message: String) {
+        DebugLogger.shared.info("REMOTE_BENCH id=\(requestID) \(message)", source: "RemoteAPIBenchmark")
+    }
+
+    private static func audioFileExtension(from request: RemoteAPI.Request) -> String {
+        let contentType = request.headers["content-type"]?.lowercased() ?? ""
+        if contentType.contains("audio/mp4") || contentType.contains("audio/m4a") { return "m4a" }
+        return "wav"
     }
 }
