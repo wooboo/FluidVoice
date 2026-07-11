@@ -18,9 +18,14 @@ final class RemoteAPIServer: ObservableObject {
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: RemoteAPIConnectionHandler] = [:]
     private var tlsIdentity: RemoteTLSIdentity?
+    private var retryTask: Task<Void, Never>?
+    private let configuredPort: UInt16
+    private let isEnabledProvider: () -> Bool
+    private let retryDelayNanoseconds: UInt64
+    private let maxRequestBytes: Int
 
     var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "RemoteAPIEnabled") }
+        get { self.isEnabledProvider() }
         set {
             UserDefaults.standard.set(newValue, forKey: "RemoteAPIEnabled")
             newValue ? self.start() : self.stop()
@@ -28,12 +33,31 @@ final class RemoteAPIServer: ObservableObject {
         }
     }
 
-    var port: UInt16 { RemoteAPI.defaultPort }
+    var port: UInt16 { self.configuredPort }
 
-    private init() {}
+    private init() {
+        self.configuredPort = RemoteAPI.defaultPort
+        self.isEnabledProvider = { UserDefaults.standard.bool(forKey: "RemoteAPIEnabled") }
+        self.retryDelayNanoseconds = 1_000_000_000
+        self.maxRequestBytes = RemoteAPI.maxRequestBytes
+    }
+
+    init(
+        port: UInt16,
+        retryDelayNanoseconds: UInt64,
+        maxRequestBytes: Int = RemoteAPI.maxRequestBytes,
+        isEnabled: @escaping () -> Bool
+    ) {
+        self.configuredPort = port
+        self.isEnabledProvider = isEnabled
+        self.retryDelayNanoseconds = retryDelayNanoseconds
+        self.maxRequestBytes = maxRequestBytes
+    }
 
     func start() {
         guard self.isEnabled, self.listener == nil else { return }
+        self.retryTask?.cancel()
+        self.retryTask = nil
         do {
             let identity = try RemoteTLSIdentityStore.loadOrCreate()
             let tls = NWProtocolTLS.Options()
@@ -51,8 +75,11 @@ final class RemoteAPIServer: ObservableObject {
             listener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor [weak self] in self?.accept(connection) }
             }
-            listener.stateUpdateHandler = { [weak self] state in
-                Task { @MainActor [weak self] in self?.handle(state) }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                Task { @MainActor [weak self, weak listener] in
+                    guard let self, let listener, self.listener === listener else { return }
+                    self.handle(state)
+                }
             }
             self.tlsIdentity = identity
             self.listener = listener
@@ -65,9 +92,12 @@ final class RemoteAPIServer: ObservableObject {
     }
 
     func stop() {
+        self.retryTask?.cancel()
+        self.retryTask = nil
         self.pairing.cancel()
         self.connections.values.forEach { $0.cancel() }
         self.connections.removeAll()
+        self.listener?.stateUpdateHandler = nil
         self.listener?.cancel()
         self.listener = nil
         self.isRunning = false
@@ -104,7 +134,11 @@ final class RemoteAPIServer: ObservableObject {
     }
 
     private func accept(_ connection: NWConnection) {
-        let handler = RemoteAPIConnectionHandler(connection: connection, router: self.router)
+        let handler = RemoteAPIConnectionHandler(
+            connection: connection,
+            router: self.router,
+            maxRequestBytes: self.maxRequestBytes
+        )
         let id = ObjectIdentifier(handler)
         handler.onClose = { [weak self] in
             Task { @MainActor [weak self] in self?.connections[id] = nil }
@@ -117,14 +151,47 @@ final class RemoteAPIServer: ObservableObject {
         switch state {
         case .ready:
             self.isRunning = true
+            self.lastError = nil
             DebugLogger.shared.info("Remote API listening on HTTPS port \(self.port)", source: "RemoteAPIServer")
+        case let .waiting(error):
+            self.recoverListener(after: error)
         case let .failed(error):
-            self.lastError = error.localizedDescription
-            self.stop()
+            self.recoverListener(after: error)
         case .cancelled:
             self.isRunning = false
         default:
             break
+        }
+    }
+
+    private func recoverListener(after error: NWError) {
+        self.lastError = error.localizedDescription
+        self.isRunning = false
+        self.connections.values.forEach { $0.cancel() }
+        self.connections.removeAll()
+        self.listener?.stateUpdateHandler = nil
+        self.listener?.cancel()
+        self.listener = nil
+
+        guard self.isEnabled else { return }
+        DebugLogger.shared.warning(
+            "Remote API listener unavailable; retrying: \(error.localizedDescription)",
+            source: "RemoteAPIServer"
+        )
+        self.scheduleRetry()
+    }
+
+    private func scheduleRetry() {
+        self.retryTask?.cancel()
+        self.retryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: self.retryDelayNanoseconds)
+            } catch {
+                return
+            }
+            self.retryTask = nil
+            self.start()
         }
     }
 
@@ -222,6 +289,7 @@ final class RemoteAPIServer: ObservableObject {
 private final class RemoteAPIConnectionHandler {
     private let connection: NWConnection
     private let router: RemoteAPIRouter
+    private let maxRequestBytes: Int
     private var buffer = Data()
     private var closed = false
     private var requestStartedAt: TimeInterval?
@@ -230,9 +298,10 @@ private final class RemoteAPIConnectionHandler {
     private var idleTimeoutTask: Task<Void, Never>?
     var onClose: (() -> Void)?
 
-    init(connection: NWConnection, router: RemoteAPIRouter) {
+    init(connection: NWConnection, router: RemoteAPIRouter, maxRequestBytes: Int) {
         self.connection = connection
         self.router = router
+        self.maxRequestBytes = maxRequestBytes
     }
 
     func start(on queue: DispatchQueue) {
@@ -253,8 +322,10 @@ private final class RemoteAPIConnectionHandler {
                     if self.requestStartedAt == nil { self.requestStartedAt = ProcessInfo.processInfo.systemUptime }
                     self.buffer.append(data)
                 }
-                guard self.buffer.count <= RemoteAPI.maxRequestBytes else {
-                    self.send(RemoteAPI.error("Request too large.", status: 413)); return
+                guard self.buffer.count <= self.maxRequestBytes else {
+                    self.buffer = Data()
+                    self.send(RemoteAPI.error("Request too large.", status: 413), closeAfterResponse: true)
+                    return
                 }
                 switch self.parseRequest() {
                 case let .request(request):
@@ -265,7 +336,9 @@ private final class RemoteAPIConnectionHandler {
                         "request_received bytes=\(request.body.count) uploadMs=\(Self.milliseconds(since: request.receivedAt)) connectionRequest=\(self.requestCount)"
                     )
                     self.send(await self.router.route(request))
-                case let .failure(response): self.send(response)
+                case let .failure(response):
+                    self.buffer = Data()
+                    self.send(response, closeAfterResponse: true)
                 case .incomplete:
                     self.armIdleTimeout()
                     self.receive()
@@ -294,10 +367,16 @@ private final class RemoteAPIConnectionHandler {
             headers[String(line[..<separator]).lowercased()] = line[line.index(after: separator)...]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard let rawLength = headers["content-length"], let length = Int(rawLength), length >= 0 else {
+        let method = requestLine[0].uppercased()
+        let length: Int
+        if let rawLength = headers["content-length"], let parsedLength = Int(rawLength), parsedLength >= 0 {
+            length = parsedLength
+        } else if method == "GET" || method == "HEAD" || method == "DELETE" {
+            length = 0
+        } else {
             return .failure(RemoteAPI.error("Content-Length is required.", status: 411))
         }
-        guard length <= RemoteAPI.maxRequestBytes else { return .failure(RemoteAPI.error("Request too large.", status: 413)) }
+        guard length <= self.maxRequestBytes else { return .failure(RemoteAPI.error("Request too large.", status: 413)) }
         let bodyStart = headerEnd.upperBound
         guard self.buffer.count >= bodyStart + length else { return .incomplete }
         let body = Data(self.buffer[bodyStart..<(bodyStart + length)])
@@ -312,9 +391,9 @@ private final class RemoteAPIConnectionHandler {
         ))
     }
 
-    private func send(_ response: RemoteAPI.Response) {
+    private func send(_ response: RemoteAPI.Response, closeAfterResponse: Bool = false) {
         let requestStartedAt = self.requestStartedAt ?? ProcessInfo.processInfo.systemUptime
-        let shouldKeepAlive = self.requestCount < 20
+        let shouldKeepAlive = !closeAfterResponse && self.requestCount < 20
         if let requestID = self.activeRequestID {
             Self.log(
                 requestID,
