@@ -228,6 +228,58 @@ Contributions are welcome! Please create an issue first to discuss major changes
 - **Never commit personal team IDs or API keys**
 - **Check `git diff`** before committing
 
+### Fork Development Workflow
+
+This fork keeps upstream synchronization separate from local product development:
+
+| Branch | Purpose |
+| --- | --- |
+| `main` | Clean, fast-forward-only mirror of `altic-dev/FluidVoice:main` |
+| `integration` | Combined and tested version of the fork's accepted changes |
+| `feature/*`, `fix/*`, `docs/*` | One isolated change, merged by PR into `integration` |
+| `spike/*` | Disposable experiments that are not ready for integration |
+
+Internal pull requests must target `integration`, not `main`. Start regular work from the latest integration branch:
+
+```bash
+git fetch origin
+git switch -c feature/my-feature origin/integration
+```
+
+For parallel work, use a separate worktree for each branch:
+
+```bash
+git worktree add ../FluidVoice-my-feature -b feature/my-feature integration
+```
+
+The `upstream` remote intentionally fetches only `main`, because the upstream repository contains branch names that differ only by letter case and cannot all be represented safely on a default macOS filesystem. Add it once after cloning the fork:
+
+```bash
+git remote add -t main upstream https://github.com/altic-dev/FluidVoice.git
+```
+
+Synchronize the fork with upstream as a dedicated maintenance operation:
+
+```bash
+git fetch upstream
+git switch main
+git merge --ff-only upstream/main
+git push origin main
+git switch integration
+git merge main
+git push origin integration
+```
+
+Do not open an upstream PR from `integration`. When a change is ready to contribute, create a clean branch from `upstream/main` and cherry-pick only the relevant commits:
+
+```bash
+git fetch upstream
+git switch -c contrib/my-feature upstream/main
+git cherry-pick <commit>...
+```
+
+See [`AGENTS.md`](AGENTS.md) for the operational rules used by coding agents in this fork.
+
 ---
 
 ## Run Integration Tests
