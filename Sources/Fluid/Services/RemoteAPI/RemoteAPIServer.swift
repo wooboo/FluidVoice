@@ -129,22 +129,49 @@ final class RemoteAPIServer: ObservableObject {
     }
 
     private static func dictate(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.DictateResponse {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.log(input.requestID, "pipeline_start bytes=\(input.audio.count)")
         let samples = try LocalAPIAudioDecoder.samples(fromAudioData: input.audio, suggestedExtension: "wav")
+        let decodedAt = ProcessInfo.processInfo.systemUptime
+        Self.log(input.requestID, "decode_done samples=\(samples.count) elapsedMs=\(Self.milliseconds(from: startedAt, to: decodedAt))")
         let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)
+        let transcribedAt = ProcessInfo.processInfo.systemUptime
         let raw = transcription.text
+        Self.log(
+            input.requestID,
+            "asr_done elapsedMs=\(Self.milliseconds(from: decodedAt, to: transcribedAt)) chars=\(raw.count)"
+        )
         guard input.wantsEnhancement, DictationAIPostProcessingGate.isConfigured(for: .primary) else {
+            Self.log(input.requestID, "pipeline_done enhancement=skipped totalMs=\(Self.milliseconds(from: startedAt))")
             return RemoteAPI.DictateResponse(rawText: raw, finalText: raw)
         }
         do {
+            Self.log(input.requestID, "enhancement_start")
             let enhanced = try await DictationPostProcessingService.shared.process(raw).text
+            Self.log(
+                input.requestID,
+                "enhancement_done elapsedMs=\(Self.milliseconds(from: transcribedAt)) totalMs=\(Self.milliseconds(from: startedAt))"
+            )
             return RemoteAPI.DictateResponse(rawText: raw, finalText: enhanced)
         } catch {
+            Self.log(
+                input.requestID,
+                "enhancement_failed elapsedMs=\(Self.milliseconds(from: transcribedAt)) error=\(error.localizedDescription)"
+            )
             return RemoteAPI.DictateResponse(
                 rawText: raw,
                 finalText: raw,
                 enhancementError: error.localizedDescription
             )
         }
+    }
+
+    private static func milliseconds(from start: TimeInterval, to end: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int {
+        Int(((end - start) * 1_000).rounded())
+    }
+
+    private static func log(_ requestID: String, _ message: String) {
+        DebugLogger.shared.info("REMOTE_BENCH id=\(requestID) \(message)", source: "RemoteAPIBenchmark")
     }
 
     private static var instanceID: String {
@@ -194,6 +221,8 @@ private final class RemoteAPIConnectionHandler {
     private let router: RemoteAPIRouter
     private var buffer = Data()
     private var closed = false
+    private let receiveStartedAt = ProcessInfo.processInfo.systemUptime
+    private var activeRequestID: String?
     var onClose: (() -> Void)?
 
     init(connection: NWConnection, router: RemoteAPIRouter) {
@@ -218,7 +247,14 @@ private final class RemoteAPIConnectionHandler {
                     self.send(RemoteAPI.error("Request too large.", status: 413)); return
                 }
                 switch self.parseRequest() {
-                case let .request(request): self.send(await self.router.route(request))
+                case let .request(request):
+                    let requestID = RemoteAPIRouter.requestID(from: request)
+                    self.activeRequestID = requestID
+                    Self.log(
+                        requestID,
+                        "request_received bytes=\(request.body.count) transportMs=\(Self.milliseconds(since: self.receiveStartedAt))"
+                    )
+                    self.send(await self.router.route(request))
                 case let .failure(response): self.send(response)
                 case .incomplete: self.receive()
                 }
@@ -256,11 +292,18 @@ private final class RemoteAPIConnectionHandler {
             method: requestLine[0],
             path: requestLine[1],
             headers: headers,
-            body: Data(self.buffer[bodyStart..<(bodyStart + length)])
+            body: Data(self.buffer[bodyStart..<(bodyStart + length)]),
+            receivedAt: self.receiveStartedAt
         ))
     }
 
     private func send(_ response: RemoteAPI.Response) {
+        if let requestID = self.activeRequestID {
+            Self.log(
+                requestID,
+                "response_ready status=\(response.status) bytes=\(response.body.count) totalMs=\(Self.milliseconds(since: self.receiveStartedAt))"
+            )
+        }
         var headers = response.headers
         headers["Content-Length"] = String(response.body.count)
         headers["Connection"] = "close"
@@ -279,5 +322,13 @@ private final class RemoteAPIConnectionHandler {
         self.closed = true
         self.connection.cancel()
         self.onClose?()
+    }
+
+    private static func milliseconds(since start: TimeInterval) -> Int {
+        Int(((ProcessInfo.processInfo.systemUptime - start) * 1_000).rounded())
+    }
+
+    private static func log(_ requestID: String, _ message: String) {
+        DebugLogger.shared.info("REMOTE_BENCH id=\(requestID) \(message)", source: "RemoteAPIBenchmark")
     }
 }

@@ -5,12 +5,15 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.Switch
 import android.widget.TextView
+import android.util.Log
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -20,6 +23,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var result: TextView
     private lateinit var record: Button
+    private lateinit var enhancement: Switch
     private lateinit var store: CredentialStore
     private val client = RemoteClient()
     private val recorder = WavRecorder()
@@ -48,6 +52,18 @@ class MainActivity : Activity() {
             isEnabled = store.load() != null
             setOnClickListener { toggleRecording() }
         }
+        enhancement = Switch(this).apply {
+            text = "AI enhancement"
+            isChecked = getSharedPreferences("remote_preferences", MODE_PRIVATE)
+                .getBoolean("ai_enhancement", true)
+            setOnCheckedChangeListener { _, enabled ->
+                getSharedPreferences("remote_preferences", MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("ai_enhancement", enabled)
+                    .apply()
+                updateConnectionStatus()
+            }
+        }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -55,6 +71,7 @@ class MainActivity : Activity() {
             addView(TextView(context).apply { text = "FluidVoice Remote"; textSize = 32f })
             addView(status, ViewGroup.LayoutParams(-1, -2))
             addView(pair, ViewGroup.LayoutParams(-1, -2))
+            addView(enhancement, ViewGroup.LayoutParams(-1, -2))
             addView(record, ViewGroup.LayoutParams(-1, -2))
             addView(result, ViewGroup.LayoutParams(-1, -2))
         }
@@ -101,10 +118,16 @@ class MainActivity : Activity() {
         isRecording = false
         record.isEnabled = false
         record.text = "Transcribing..."
+        val stopStartedAt = SystemClock.elapsedRealtime()
         val wav = recorder.stop()
+        Log.i(
+            "FluidVoiceRemote",
+            "REMOTE_BENCH phase=recording_stopped elapsedMs=${SystemClock.elapsedRealtime() - stopStartedAt} bytes=${wav.size}",
+        )
         val connection = store.load() ?: return
+        val enhance = enhancement.isChecked
         thread {
-            runCatching { client.dictate(connection, wav) }
+            runCatching { client.dictate(connection, wav, enhance) }
                 .onSuccess { text -> runOnUiThread { result.text = text; resetRecordButton() } }
                 .onFailure { runOnUiThread { showError(it); resetRecordButton() } }
         }
@@ -117,12 +140,16 @@ class MainActivity : Activity() {
 
     private fun updateConnectionStatus() {
         val connected = store.load() != null
-        status.text = if (connected) "Paired with desktop" else "Pair with FluidVoice on your Mac"
+        status.text = when {
+            !connected -> "Pair with FluidVoice on your Mac"
+            enhancement.isChecked -> "Paired - AI enhancement on"
+            else -> "Paired - Fast transcription"
+        }
         record.isEnabled = connected
     }
 
     private fun resetRecordButton() {
-        status.text = "Paired with desktop"
+        updateConnectionStatus()
         record.text = "Start dictation"
         record.isEnabled = true
     }

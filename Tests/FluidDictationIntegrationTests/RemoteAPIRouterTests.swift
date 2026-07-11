@@ -41,6 +41,7 @@ final class RemoteAPIRouterTests: XCTestCase {
         let router = RemoteAPIRouter(pairing: pairing, dictate: { input in
             XCTAssertEqual(input.audio, Data("audio".utf8))
             XCTAssertFalse(input.wantsEnhancement)
+            XCTAssertFalse(input.requestID.isEmpty)
             return .init(rawText: "hello", finalText: "Hello.")
         })
 

@@ -1,5 +1,7 @@
 package com.fluidvoice.remote
 
+import android.os.SystemClock
+import android.util.Log
 import org.json.JSONObject
 import java.net.URL
 import java.security.MessageDigest
@@ -10,9 +12,12 @@ import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import java.util.UUID
 
 class RemoteClient {
     fun pair(payload: PairingPayload, deviceId: String, deviceName: String): CredentialStore.Connection {
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "REMOTE_BENCH phase=pair_start instance=${payload.instanceId}")
         val body = JSONObject()
             .put("deviceID", deviceId)
             .put("deviceName", deviceName)
@@ -23,15 +28,21 @@ class RemoteClient {
             setRequestProperty("Content-Type", "application/json")
         }
         val credential = JSONObject(String(response)).getString("credential")
+        Log.i(TAG, "REMOTE_BENCH phase=pair_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
         return CredentialStore.Connection(payload.instanceId, payload.baseUrl, payload.certificateSha256, credential)
     }
 
-    fun dictate(connection: CredentialStore.Connection, wav: ByteArray): String {
+    fun dictate(connection: CredentialStore.Connection, wav: ByteArray, enhance: Boolean): String {
+        val requestId = UUID.randomUUID().toString()
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_start bytes=${wav.size} enhance=$enhance")
         val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/dictate", wav) {
             setRequestProperty("Content-Type", "audio/wav")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
-            setRequestProperty("X-FluidVoice-Enhance", "true")
+            setRequestProperty("X-FluidVoice-Enhance", enhance.toString())
+            setRequestProperty("X-Request-ID", requestId)
         }
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt} bytes=${response.size}")
         return JSONObject(String(response)).getString("finalText")
     }
 
@@ -59,6 +70,10 @@ class RemoteClient {
         val response = stream.use { it.readBytes() }
         check(connection.responseCode in 200..299) { JSONObject(String(response)).optString("error", "Request failed") }
         return response
+    }
+
+    private companion object {
+        const val TAG = "FluidVoiceRemote"
     }
 }
 
