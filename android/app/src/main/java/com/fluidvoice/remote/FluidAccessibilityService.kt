@@ -61,22 +61,25 @@ class FluidAccessibilityService : AccessibilityService() {
                 capturedEditableNode = null
                 Log.i(TAG, "Text insertion skipped: captured node is unavailable")
                 return false
-            }
+        }
         capturedEditableNode = null
-        val current = target.text?.toString().orEmpty()
-        val selectionStart = target.textSelectionStart.takeIf { it in 0..current.length } ?: current.length
-        val selectionEnd = target.textSelectionEnd.takeIf { it in selectionStart..current.length } ?: selectionStart
-        val updated = current.substring(0, selectionStart) + text + current.substring(selectionEnd)
+        val update = buildTextInsertionUpdate(
+            nodeText = target.text,
+            isShowingHintText = target.isShowingHintText,
+            selectionStart = target.textSelectionStart,
+            selectionEnd = target.textSelectionEnd,
+            insertedText = text,
+        )
         val arguments = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, updated)
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, update.text)
         }
         val inserted = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
         if (inserted) {
             target.performAction(
                 AccessibilityNodeInfo.ACTION_SET_SELECTION,
                 Bundle().apply {
-                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, selectionStart + text.length)
-                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, selectionStart + text.length)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, update.cursor)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, update.cursor)
                 },
             )
         }
