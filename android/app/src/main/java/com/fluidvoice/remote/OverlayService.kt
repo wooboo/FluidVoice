@@ -118,8 +118,8 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = resources.displayMetrics.widthPixels - dp(128)
-            y = resources.displayMetrics.heightPixels / 2
+            x = resources.displayMetrics.widthPixels - dp(COLLAPSED_PANEL_WIDTH_DP + OVERLAY_EDGE_MARGIN_DP)
+            y = (resources.displayMetrics.heightPixels - dp(COLLAPSED_PANEL_HEIGHT_DP)) / 2
         }
         idleX = layoutParams.x
         idleY = layoutParams.y
@@ -128,17 +128,16 @@ class OverlayService : Service() {
     }
 
     private fun buildCollapsedButton(): LinearLayout = LinearLayout(this).apply {
-        layoutParams = FrameLayout.LayoutParams(dp(112), dp(60))
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(4), dp(4), dp(4), dp(4))
+        layoutParams = FrameLayout.LayoutParams(dp(COLLAPSED_PANEL_WIDTH_DP), dp(COLLAPSED_PANEL_HEIGHT_DP))
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(dp(6), dp(6), dp(6), dp(6))
         background = roundedBackground(0xff151d32.toInt(), 30f)
-        elevation = dp(8).toFloat()
         contentDescription = getString(R.string.overlay_idle)
-        addView(captureModeButton(CaptureMode.Dictation), LinearLayout.LayoutParams(dp(50), dp(52)).apply {
-            marginEnd = dp(4)
+        addView(captureModeButton(CaptureMode.Dictation), LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+            bottomMargin = dp(6)
         })
-        addView(captureModeButton(CaptureMode.SmartNote), LinearLayout.LayoutParams(dp(50), dp(52)))
+        addView(captureModeButton(CaptureMode.SmartNote), LinearLayout.LayoutParams(dp(48), dp(48)))
     }
 
     private fun captureModeButton(mode: CaptureMode): FrameLayout = FrameLayout(this).apply {
@@ -160,7 +159,6 @@ class OverlayService : Service() {
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(14), dp(6), dp(8), dp(6))
         background = roundedBackground(0xff151d32.toInt(), 30f)
-        elevation = dp(8).toFloat()
         contentDescription = getString(R.string.overlay_recording)
 
         modeIcon = ImageView(context).apply {
@@ -488,6 +486,9 @@ class OverlayService : Service() {
         private const val NOTIFICATION_ID = 7301
         private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
+        private const val COLLAPSED_PANEL_WIDTH_DP = 60
+        private const val COLLAPSED_PANEL_HEIGHT_DP = 114
+        private const val OVERLAY_EDGE_MARGIN_DP = 16
 
         @Volatile
         var isRunning = false
