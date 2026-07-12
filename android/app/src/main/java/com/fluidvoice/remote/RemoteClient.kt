@@ -36,7 +36,12 @@ class RemoteClient {
         return CredentialStore.Connection(payload.instanceId, payload.baseUrl, payload.certificateSha256, credential)
     }
 
-    fun dictate(connection: CredentialStore.Connection, audio: ByteArray, enhance: Boolean): String {
+    internal fun dictate(
+        connection: CredentialStore.Connection,
+        audio: ByteArray,
+        enhance: Boolean,
+        inputContext: InputFieldContext? = null,
+    ): String {
         val requestId = UUID.randomUUID().toString()
         val startedAt = SystemClock.elapsedRealtime()
         Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_start bytes=${audio.size} format=m4a enhance=$enhance")
@@ -44,6 +49,9 @@ class RemoteClient {
             setRequestProperty("Content-Type", "audio/mp4")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
             setRequestProperty("X-FluidVoice-Enhance", enhance.toString())
+            encodeInputFieldContextHeader(inputContext, enhance)?.let {
+                setRequestProperty("X-FluidVoice-Input-Context", it)
+            }
             setRequestProperty("X-Request-ID", requestId)
         }
         Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt} bytes=${response.size}")

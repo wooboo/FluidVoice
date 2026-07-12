@@ -57,6 +57,7 @@ class OverlayService : Service() {
     private var amplitudeWindowStartedAt = 0L
     private var amplitudeMinimum = Int.MAX_VALUE
     private var amplitudeMaximum = 0
+    private var inputFieldContext: InputFieldContext? = null
 
     private val amplitudeSampler = object : Runnable {
         override fun run() {
@@ -210,7 +211,13 @@ class OverlayService : Service() {
     private fun beginRecording(mode: CaptureMode) {
         if (state != OverlayState.Idle) return
         val next = OverlayReducer.reduce(state, OverlayAction.Start(mode))
-        if (mode == CaptureMode.Dictation) FluidAccessibilityService.captureTarget()
+        inputFieldContext = if (mode == CaptureMode.Dictation) {
+            FluidAccessibilityService.captureTarget(
+                includeContext = RemotePreferences.isAiEnhancementEnabled(this),
+            )
+        } else {
+            null
+        }
         runCatching { recorder.start() }
             .onSuccess {
                 state = next
@@ -223,6 +230,7 @@ class OverlayService : Service() {
             }
             .onFailure {
                 if (mode == CaptureMode.Dictation) FluidAccessibilityService.clearCapturedTarget()
+                inputFieldContext = null
                 showError(it.message ?: "Microphone is unavailable")
             }
     }
@@ -239,6 +247,7 @@ class OverlayService : Service() {
         runCatching { recorder.stop() }
         preconnectThread = null
         FluidAccessibilityService.clearCapturedTarget()
+        inputFieldContext = null
         state = OverlayReducer.reduce(state, OverlayAction.Reject)
         renderState()
         updateNotification("Ready to dictate")
@@ -260,6 +269,11 @@ class OverlayService : Service() {
             return
         }
         val mode = recording.mode
+        val enhance = when (mode) {
+            CaptureMode.Dictation -> RemotePreferences.isAiEnhancementEnabled(this)
+            CaptureMode.SmartNote -> RemotePreferences.isSmartNotesEnhancementEnabled(this)
+        }
+        val context = inputFieldContext.takeIf { mode == CaptureMode.Dictation && enhance }
         val preparation = preconnectThread.also { preconnectThread = null }
         thread(name = "fluidvoice-overlay-capture") {
             preparation?.join(PRECONNECT_WAIT_MS)
@@ -268,12 +282,13 @@ class OverlayService : Service() {
                     CaptureMode.Dictation -> OverlayResult.Dictation(client.dictate(
                         connection,
                         audio,
-                        RemotePreferences.isAiEnhancementEnabled(this),
+                        enhance,
+                        context,
                     ))
                     CaptureMode.SmartNote -> OverlayResult.Note(client.captureNote(
                         connection,
                         audio,
-                        RemotePreferences.isSmartNotesEnhancementEnabled(this),
+                        enhance,
                     ))
                 }
             }
@@ -287,6 +302,7 @@ class OverlayService : Service() {
             is OverlayResult.Dictation -> deliverText(result.text)
             is OverlayResult.Note -> {
                 FluidAccessibilityService.clearCapturedTarget()
+                inputFieldContext = null
                 val enhancementError = result.capture.enhancementError
                 val message = if (enhancementError == null) {
                     "Saved: ${result.capture.note.title}"
@@ -307,6 +323,7 @@ class OverlayService : Service() {
 
     private fun deliverText(text: String) {
         val inserted = FluidAccessibilityService.insertText(text)
+        inputFieldContext = null
         Log.i("FluidVoiceRemote", "OVERLAY_INSERT inserted=$inserted chars=${text.length}")
         if (!inserted) {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
@@ -320,6 +337,7 @@ class OverlayService : Service() {
 
     private fun showError(message: String) {
         FluidAccessibilityService.clearCapturedTarget()
+        inputFieldContext = null
         state = if (state is OverlayState.Processing) {
             OverlayReducer.reduce(state, OverlayAction.Fail(message))
         } else {

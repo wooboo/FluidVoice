@@ -68,7 +68,27 @@ enum RemoteAPI {
         let audio: Data
         let audioFileExtension: String
         let wantsEnhancement: Bool
+        let inputContext: InputFieldContext?
         let requestID: String
+
+        init(
+            audio: Data,
+            audioFileExtension: String,
+            wantsEnhancement: Bool,
+            inputContext: InputFieldContext? = nil,
+            requestID: String
+        ) {
+            self.audio = audio
+            self.audioFileExtension = audioFileExtension
+            self.wantsEnhancement = wantsEnhancement
+            self.inputContext = inputContext
+            self.requestID = requestID
+        }
+    }
+
+    struct InputFieldContext: Codable, Equatable {
+        let label: String?
+        let placeholder: String?
     }
 
     struct SmartNoteResponse: Codable, Equatable {

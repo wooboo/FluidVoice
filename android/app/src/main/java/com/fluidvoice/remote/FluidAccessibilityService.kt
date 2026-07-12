@@ -44,10 +44,25 @@ class FluidAccessibilityService : AccessibilityService() {
             ?: lastEditableNode?.takeIf { it.refresh() && it.isEditable }
     }
 
-    private fun captureFocusedField(): Boolean {
-        capturedEditableNode = findFocusedEditableNode()
-        Log.i(TAG, "Insertion target captured=${capturedEditableNode != null}")
-        return capturedEditableNode != null
+    @Suppress("DEPRECATION")
+    private fun captureFocusedField(includeContext: Boolean): InputFieldContext? {
+        val target = findFocusedEditableNode()
+        capturedEditableNode = target
+        val inputContext = target?.takeIf { includeContext }?.let {
+            buildInputFieldContext(
+                nodeText = it.text,
+                isShowingHintText = it.isShowingHintText,
+                isPassword = it.isPassword,
+                hintText = it.hintText,
+                labeledByText = it.labeledBy?.text,
+                contentDescription = it.contentDescription,
+            )
+        }
+        Log.i(
+            TAG,
+            "Insertion target captured=${target != null} label=${inputContext?.label != null} placeholder=${inputContext?.placeholder != null}",
+        )
+        return inputContext
     }
 
     private fun clearCapturedField() {
@@ -91,7 +106,8 @@ class FluidAccessibilityService : AccessibilityService() {
         @Volatile
         private var activeService: WeakReference<FluidAccessibilityService>? = null
 
-        fun captureTarget(): Boolean = activeService?.get()?.captureFocusedField() == true
+        internal fun captureTarget(includeContext: Boolean): InputFieldContext? =
+            activeService?.get()?.captureFocusedField(includeContext)
 
         fun clearCapturedTarget() {
             activeService?.get()?.clearCapturedField()

@@ -223,7 +223,10 @@ final class RemoteAPIServer: ObservableObject {
         }
         do {
             Self.log(input.requestID, "enhancement_start")
-            let enhanced = try await DictationPostProcessingService.shared.process(raw).text
+            let enhanced = try await DictationPostProcessingService.shared.process(
+                raw,
+                inputContext: input.inputContext
+            ).text
             Self.log(
                 input.requestID,
                 "enhancement_done elapsedMs=\(Self.milliseconds(from: transcribedAt)) totalMs=\(Self.milliseconds(from: startedAt))"

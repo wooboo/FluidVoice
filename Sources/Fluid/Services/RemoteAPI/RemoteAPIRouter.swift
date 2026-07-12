@@ -141,6 +141,7 @@ final class RemoteAPIRouter {
                 audio: request.body,
                 audioFileExtension: Self.audioFileExtension(from: request),
                 wantsEnhancement: wantsEnhancement,
+                inputContext: wantsEnhancement ? Self.inputContext(from: request) : nil,
                 requestID: requestID
             )))
         } catch {
@@ -172,5 +173,29 @@ final class RemoteAPIRouter {
         return "wav"
     }
 
+    private static func inputContext(from request: RemoteAPI.Request) -> RemoteAPI.InputFieldContext? {
+        guard let encoded = request.headers["x-fluidvoice-input-context"],
+              encoded.utf8.count <= 2_048,
+              let data = Data(base64Encoded: encoded),
+              let decoded = try? JSONDecoder().decode(RemoteAPI.InputFieldContext.self, from: data)
+        else { return nil }
+
+        let label = Self.contextValue(decoded.label)
+        let placeholder = Self.contextValue(decoded.placeholder)
+        guard label != nil || placeholder != nil else { return nil }
+        return RemoteAPI.InputFieldContext(label: label, placeholder: placeholder)
+    }
+
+    private static func contextValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        return String(value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(200))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nonEmpty
+    }
+
     private static let notesPathPrefix = "/remote/v1/notes/"
+}
+
+private extension String {
+    var nonEmpty: String? { self.isEmpty ? nil : self }
 }
