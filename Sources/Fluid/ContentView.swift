@@ -3044,15 +3044,7 @@ struct ContentView: View {
         await self.menuBarManager.finishProcessingAndHideOverlay()
     }
 
-    private static let smartNotesEnhancementPrompt = """
-    Turn the voice transcript into a useful structured note without inventing facts or adding advice.
-    Remove fillers and false starts, preserve the speaker's meaning, and use concise Markdown in the body.
-    Choose one short category and up to eight lowercase tags.
-
-    Return only valid JSON with exactly this shape:
-    {"title":"Short descriptive title","category":"Category","tags":["tag"],"body":"Markdown note body"}
-    Do not wrap the JSON in a code fence.
-    """
+    private static let smartNotesEnhancementPrompt = SmartNoteCaptureService.enhancementPrompt
 
     private func setActiveRecordingMode(_ mode: ActiveRecordingMode) {
         if mode != .dictate, mode != .promptMode {

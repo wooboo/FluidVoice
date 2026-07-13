@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FluidVoice</string>
+    <string name="accessibility_description">Inserts completed FluidVoice transcriptions into the text field you were using.</string>
+    <string name="overlay_idle">FluidVoice Dictation and Smart Note</string>
+    <string name="overlay_start_dictation">Start dictation</string>
+    <string name="overlay_start_note">Start Smart Note</string>
+    <string name="overlay_recording">Recording. Confirm or discard.</string>
+    <string name="overlay_processing">Transcribing recording</string>
+    <string name="overlay_error">FluidVoice error: %1$s</string>
+    <string name="overlay_confirm">Stop and transcribe</string>
+    <string name="overlay_confirm_note">Stop and save note</string>
+    <string name="overlay_reject">Discard recording</string>
+</resources>

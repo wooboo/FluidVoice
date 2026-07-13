@@ -32,7 +32,15 @@ struct SmartNoteEnhancement: Decodable, Equatable {
         }
 
         do {
-            let decoded = try JSONDecoder().decode(Self.self, from: data)
+            let decoded: Self
+            do {
+                decoded = try JSONDecoder().decode(Self.self, from: data)
+            } catch {
+                guard let repaired = Self.escapingControlCharactersInsideStrings(json).data(using: .utf8) else {
+                    throw error
+                }
+                decoded = try JSONDecoder().decode(Self.self, from: repaired)
+            }
             let title = decoded.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let body = decoded.body.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty, !body.isEmpty else {
@@ -53,6 +61,37 @@ struct SmartNoteEnhancement: Decodable, Equatable {
         } catch {
             throw SmartNotesError.invalidAIResponse
         }
+    }
+
+    private static func escapingControlCharactersInsideStrings(_ json: String) -> String {
+        var result = ""
+        var isInsideString = false
+        var isEscaped = false
+
+        for character in json {
+            if isInsideString {
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    isInsideString = false
+                } else if character == "\n" {
+                    result.append("\\n")
+                    continue
+                } else if character == "\r" {
+                    result.append("\\r")
+                    continue
+                } else if character == "\t" {
+                    result.append("\\t")
+                    continue
+                }
+            } else if character == "\"" {
+                isInsideString = true
+            }
+            result.append(character)
+        }
+        return result
     }
 }
 
@@ -84,7 +123,9 @@ final class SmartNotesStore: ObservableObject {
 
     init(directoryURL: URL? = nil, fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        self.notesDirectoryURL = directoryURL ?? Self.defaultNotesDirectory(fileManager: fileManager)
+        self.notesDirectoryURL = (directoryURL ?? Self.defaultNotesDirectory(fileManager: fileManager))
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
         self.reload()
     }
 
@@ -202,7 +243,7 @@ final class SmartNotesStore: ObservableObject {
             tags: Self.decodeTags(metadata["tags"]),
             body: body.trimmingCharacters(in: .whitespacesAndNewlines),
             isAIEnhanced: metadata["enhanced"] == "true",
-            fileURL: url
+            fileURL: self.notesDirectoryURL.appendingPathComponent(url.lastPathComponent)
         )
     }
 
