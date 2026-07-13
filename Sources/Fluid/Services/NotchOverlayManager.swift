@@ -417,6 +417,8 @@ final class NotchOverlayManager {
         switch promptMode.normalized {
         case .dictate:
             self.setMode(.dictation)
+        case .smartNote:
+            self.setMode(.dictation)
         case .edit:
             self.setMode(.edit)
         case .write, .rewrite:

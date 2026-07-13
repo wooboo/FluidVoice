@@ -33,11 +33,13 @@ class MainActivity : ComponentActivity() {
     private var uiState by mutableStateOf(AppUiState())
     private var preconnectThread: Thread? = null
     private var microphonePermissionPurpose: MicrophonePermissionPurpose? = null
+    private var pendingOpenNoteId: String? = null
 
     private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (!granted) return@registerForActivityResult
         when (microphonePermissionPurpose.also { microphonePermissionPurpose = null }) {
             MicrophonePermissionPurpose.DirectCapture -> startCapture()
+            MicrophonePermissionPurpose.NoteConversation -> startNoteConversation()
             MicrophonePermissionPurpose.Overlay -> startOverlayIfReady()
             null -> Unit
         }
@@ -66,19 +68,23 @@ class MainActivity : ComponentActivity() {
                         refreshNotes = ::refreshNotes,
                         openNote = { uiState = uiState.copy(selectedNote = it) },
                         requestDeleteNote = { uiState = uiState.copy(notePendingDeletion = it, noteDeleteError = null) },
+                        setNotesTagFilter = { uiState = uiState.copy(notesTagFilter = it, notesTagQuery = it.orEmpty()) },
+                        setNotesTagQuery = { uiState = uiState.copy(notesTagQuery = it) },
                         dismissDeleteNote = {
                             if (!uiState.isDeletingNote) {
                                 uiState = uiState.copy(notePendingDeletion = null, noteDeleteError = null)
                             }
                         },
                         confirmDeleteNote = ::deletePendingNote,
-                        setCaptureMode = { uiState = uiState.copy(captureMode = it, captureMessage = null) },
+                        selectPrompt = { uiState = uiState.copy(selectedPromptId = it, captureMessage = null) },
                         startCapture = ::startCapture,
                         confirmCapture = ::confirmCapture,
                         rejectCapture = ::rejectCapture,
+                        startNoteConversation = ::startNoteConversation,
+                        confirmNoteConversation = ::confirmNoteConversation,
+                        rejectNoteConversation = ::rejectNoteConversation,
                         scanPairingCode = ::scanPairingCode,
-                        setDictationEnhancement = ::setDictationEnhancement,
-                        setNotesEnhancement = ::setNotesEnhancement,
+                        setOverlayPromptVisible = ::setOverlayPromptVisible,
                         toggleOverlay = ::toggleOverlay,
                         openAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -87,8 +93,18 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        handleIntent(intent)
         refreshNotes()
+        refreshPrompts()
         restoreOverlayIfReady()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+        refreshNotes()
+        refreshPrompts()
     }
 
     override fun onResume() {
@@ -96,6 +112,7 @@ class MainActivity : ComponentActivity() {
         if (::store.isInitialized) {
             refreshSystemState()
             refreshNotes()
+            refreshPrompts()
             restoreOverlayIfReady()
         }
     }
@@ -104,6 +121,12 @@ class MainActivity : ComponentActivity() {
         handler.removeCallbacksAndMessages(null)
         if (uiState.isRecording) runCatching { recorder.stop() }
         super.onDestroy()
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action != ACTION_OPEN_NOTE) return
+        pendingOpenNoteId = intent.getStringExtra(EXTRA_NOTE_ID)
+        uiState = uiState.copy(section = AppSection.Notes)
     }
 
     private fun scanPairingCode() {
@@ -130,6 +153,7 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     refreshSystemState()
                     refreshNotes()
+                    refreshPrompts()
                     restoreOverlayIfReady()
                 }
             }.onFailure { runOnUiThread { showError(it) } }
@@ -147,7 +171,17 @@ class MainActivity : ComponentActivity() {
             runCatching { client.listNotes(connection) }
                 .onSuccess { notes ->
                     runOnUiThread {
-                        uiState = uiState.copy(notes = notes, notesLoading = false, notesError = null)
+                        val noteToOpen = pendingOpenNoteId?.let { id -> notes.firstOrNull { it.id == id } }
+                        if (noteToOpen != null) pendingOpenNoteId = null
+                        uiState = uiState.copy(
+                            notes = notes,
+                            notesLoading = false,
+                            notesError = null,
+                            section = if (noteToOpen != null) AppSection.Notes else uiState.section,
+                            selectedNote = noteToOpen ?: uiState.selectedNote?.let { selected ->
+                                notes.firstOrNull { it.id == selected.id } ?: selected
+                            },
+                        )
                     }
                 }
                 .onFailure { error ->
@@ -155,6 +189,30 @@ class MainActivity : ComponentActivity() {
                         uiState = uiState.copy(notesLoading = false, notesError = error.message ?: "Connection failed")
                     }
                 }
+        }
+    }
+
+    private fun refreshPrompts() {
+        val connection = store.load() ?: run {
+            uiState = uiState.copy(prompts = RemotePrompt.fallbackPrompts)
+            return
+        }
+        thread(name = "fluidvoice-prompts-refresh") {
+            runCatching { client.listPrompts(connection) }
+                .onSuccess { prompts ->
+                    RemotePreferences.setCachedPrompts(this, prompts)
+                    runOnUiThread {
+                        val available = prompts.ifEmpty { RemotePrompt.fallbackPrompts }
+                        val selected = uiState.selectedPromptId.takeIf { id -> available.any { it.id == id } }
+                            ?: available.first().id
+                        uiState = uiState.copy(
+                            prompts = available,
+                            selectedPromptId = selected,
+                            hiddenOverlayPromptIds = RemotePreferences.hiddenOverlayPromptIds(this),
+                        )
+                    }
+                }
+                .onFailure { Log.w(TAG, "Unable to refresh prompts", it) }
         }
     }
 
@@ -224,23 +282,90 @@ class MainActivity : ComponentActivity() {
             showError(IllegalStateException("Pair with your Mac first"))
             return
         }
-        val mode = uiState.captureMode
+        val prompt = uiState.prompts.firstOrNull { it.id == uiState.selectedPromptId }
+            ?: RemotePrompt.fallbackPrompts.first()
         val preparation = preconnectThread.also { preconnectThread = null }
         uiState = uiState.copy(isRecording = false, isProcessing = true, audioLevel = 0f, captureMessage = null)
-        Log.i(TAG, "REMOTE_BENCH phase=capture_stopped bytes=${audio.size} format=m4a mode=$mode")
+        Log.i(TAG, "REMOTE_BENCH phase=capture_stopped bytes=${audio.size} format=m4a prompt=${prompt.id}")
         thread(name = "fluidvoice-capture") {
             preparation?.join(PRECONNECT_WAIT_MS)
             runCatching {
-                when (mode) {
-                    CaptureMode.Dictation -> CaptureResult.Dictation(
-                        client.dictate(connection, audio, RemotePreferences.isAiEnhancementEnabled(this)),
+                when (prompt.kind) {
+                    RemotePromptKind.Dictation -> CaptureResult.Dictation(
+                        client.dictate(
+                            connection = connection,
+                            audio = audio,
+                            enhance = !prompt.isWithoutAI,
+                            promptId = prompt.id.takeUnless { prompt.isWithoutAI },
+                        ),
                     )
-                    CaptureMode.SmartNote -> CaptureResult.Note(
-                        client.captureNote(connection, audio, RemotePreferences.isSmartNotesEnhancementEnabled(this)),
+                    RemotePromptKind.SmartNote -> CaptureResult.Note(
+                        client.captureNote(
+                            connection,
+                            audio,
+                            !prompt.isWithoutAI,
+                            prompt.id,
+                        ),
                     )
                 }
             }.onSuccess { result -> runOnUiThread { finishCapture(result) } }
                 .onFailure { error -> runOnUiThread { showError(error) } }
+        }
+    }
+
+    private fun startNoteConversation() {
+        if (uiState.selectedNote == null) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            microphonePermissionPurpose = MicrophonePermissionPurpose.NoteConversation
+            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        runCatching { recorder.start() }
+            .onSuccess {
+                uiState = uiState.copy(isRecording = true, audioLevel = 0f, captureMessage = null)
+                preconnectThread = store.load()?.let { startPreconnect(it, "note-conversation") }
+                handler.post(levelSampler)
+            }
+            .onFailure(::showError)
+    }
+
+    private fun rejectNoteConversation() {
+        rejectCapture()
+    }
+
+    private fun confirmNoteConversation() {
+        val note = uiState.selectedNote ?: return
+        if (!uiState.isRecording) return
+        handler.removeCallbacks(levelSampler)
+        val audio = runCatching { recorder.stop() }.getOrElse {
+            showError(it)
+            return
+        }
+        val connection = store.load() ?: run {
+            showError(IllegalStateException("Pair with your Mac first"))
+            return
+        }
+        val preparation = preconnectThread.also { preconnectThread = null }
+        uiState = uiState.copy(isRecording = false, isProcessing = true, audioLevel = 0f, captureMessage = null)
+        thread(name = "fluidvoice-note-conversation") {
+            preparation?.join(PRECONNECT_WAIT_MS)
+            runCatching {
+                client.continueNote(
+                    connection = connection,
+                    noteId = note.id,
+                    audio = audio,
+                    promptId = note.promptId(),
+                )
+            }.onSuccess { capture ->
+                runOnUiThread {
+                    uiState = uiState.copy(
+                        isProcessing = false,
+                        selectedNote = capture.note,
+                        notes = uiState.notes.map { if (it.id == capture.note.id) capture.note else it },
+                    )
+                    refreshNotes()
+                }
+            }.onFailure { error -> runOnUiThread { showError(error) } }
         }
     }
 
@@ -268,14 +393,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun setDictationEnhancement(enabled: Boolean) {
-        RemotePreferences.setAiEnhancementEnabled(this, enabled)
-        uiState = uiState.copy(dictationEnhancement = enabled)
+    private fun setOverlayPromptVisible(promptId: String, visible: Boolean) {
+        RemotePreferences.setOverlayPromptVisible(this, promptId, visible)
+        uiState = uiState.copy(hiddenOverlayPromptIds = RemotePreferences.hiddenOverlayPromptIds(this))
+        refreshOverlayIfRunning()
     }
 
-    private fun setNotesEnhancement(enabled: Boolean) {
-        RemotePreferences.setSmartNotesEnhancementEnabled(this, enabled)
-        uiState = uiState.copy(notesEnhancement = enabled)
+    private fun refreshOverlayIfRunning() {
+        if (!OverlayService.isRunning) return
+        startService(Intent(this, OverlayService::class.java).setAction(OverlayService.ACTION_REFRESH))
     }
 
     private fun toggleOverlay() {
@@ -317,8 +443,7 @@ class MainActivity : ComponentActivity() {
         uiState = uiState.copy(
             isPaired = paired,
             connectionMessage = if (paired) "Ready on your local network" else "Pair with FluidVoice on your Mac",
-            dictationEnhancement = RemotePreferences.isAiEnhancementEnabled(this),
-            notesEnhancement = RemotePreferences.isSmartNotesEnhancementEnabled(this),
+            hiddenOverlayPromptIds = RemotePreferences.hiddenOverlayPromptIds(this),
             overlayRunning = OverlayService.isRunning,
             canDrawOverlays = Settings.canDrawOverlays(this),
             accessibilityEnabled = isAccessibilityEnabled(),
@@ -364,9 +489,11 @@ class MainActivity : ComponentActivity() {
         data class Note(val capture: SmartNoteCapture) : CaptureResult
     }
 
-    private enum class MicrophonePermissionPurpose { DirectCapture, Overlay }
+    private enum class MicrophonePermissionPurpose { DirectCapture, NoteConversation, Overlay }
 
     companion object {
+        const val ACTION_OPEN_NOTE = "com.fluidvoice.remote.OPEN_NOTE"
+        const val EXTRA_NOTE_ID = "note_id"
         private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
     }

@@ -6,6 +6,7 @@ import SwiftUI
 enum MenuBarNavigationDestination: String {
     case customDictionary
     case preferences
+    case smartNotes
 }
 
 @MainActor
@@ -871,6 +872,10 @@ final class MenuBarManager: NSObject, ObservableObject, NSMenuDelegate {
     /// Public entry-point for non-menu UI surfaces (e.g. overlay controls) to open Preferences.
     func openPreferencesFromUI() {
         self.openPreferences()
+    }
+
+    func openSmartNotesFromUI() {
+        self.openNavigationDestination(.smartNotes)
     }
 
     /// Create and present a fresh main window hosting `ContentView`

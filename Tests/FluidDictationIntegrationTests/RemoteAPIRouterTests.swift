@@ -5,6 +5,54 @@ import XCTest
 
 @MainActor
 final class RemoteAPIRouterTests: XCTestCase {
+    func testRemotePromptUsesItsOwnAIConfiguration() {
+        let settings = SettingsStore.shared
+        let original = settings.dictationPromptConfigurations
+        defer { settings.dictationPromptConfigurations = original }
+        let expected = SettingsStore.DictationPromptConfiguration(
+            providerID: "prompt-provider",
+            modelName: "prompt-model"
+        )
+        settings.dictationPromptConfigurations = ["profile:shopping-list": expected]
+
+        XCTAssertEqual(
+            settings.remoteAIConfiguration(promptID: "shopping-list"),
+            expected
+        )
+    }
+
+    func testBuiltInSmartNoteUsesItsOwnAIConfiguration() {
+        let settings = SettingsStore.shared
+        let original = settings.dictationPromptConfigurations
+        defer { settings.dictationPromptConfigurations = original }
+        let expected = SettingsStore.DictationPromptConfiguration(
+            providerID: "smart-note-provider",
+            modelName: "smart-note-model"
+        )
+        settings.dictationPromptConfigurations = ["profile:__smart_note_default__": expected]
+
+        XCTAssertEqual(
+            settings.remoteAIConfiguration(promptID: "__smart_note_default__"),
+            expected
+        )
+    }
+
+    func testRemotePromptFallsBackToBuiltInDefaultAIConfiguration() {
+        let settings = SettingsStore.shared
+        let original = settings.dictationPromptConfigurations
+        defer { settings.dictationPromptConfigurations = original }
+        let expected = SettingsStore.DictationPromptConfiguration(
+            providerID: "default-provider",
+            modelName: "default-model"
+        )
+        settings.dictationPromptConfigurations = ["__default__": expected]
+
+        XCTAssertEqual(
+            settings.remoteAIConfiguration(promptID: "shopping-list"),
+            expected
+        )
+    }
+
     func testDictationPromptIsUnchangedWithoutInputContext() {
         let expected = SettingsStore.renderDictationUserMessage(
             promptText: "Clean the transcript.",

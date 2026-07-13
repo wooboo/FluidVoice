@@ -69,6 +69,8 @@ enum RemoteAPI {
         let audioFileExtension: String
         let wantsEnhancement: Bool
         let inputContext: InputFieldContext?
+        let dictationPromptID: String?
+        let notePromptID: String?
         let requestID: String
 
         init(
@@ -76,12 +78,16 @@ enum RemoteAPI {
             audioFileExtension: String,
             wantsEnhancement: Bool,
             inputContext: InputFieldContext? = nil,
+            dictationPromptID: String? = nil,
+            notePromptID: String? = nil,
             requestID: String
         ) {
             self.audio = audio
             self.audioFileExtension = audioFileExtension
             self.wantsEnhancement = wantsEnhancement
             self.inputContext = inputContext
+            self.dictationPromptID = dictationPromptID
+            self.notePromptID = notePromptID
             self.requestID = requestID
         }
     }
@@ -99,6 +105,27 @@ enum RemoteAPI {
         let tags: [String]
         let body: String
         let isAIEnhanced: Bool
+        let promptID: String?
+
+        init(
+            id: String,
+            createdAt: String,
+            title: String,
+            category: String?,
+            tags: [String],
+            body: String,
+            isAIEnhanced: Bool,
+            promptID: String? = nil
+        ) {
+            self.id = id
+            self.createdAt = createdAt
+            self.title = title
+            self.category = category
+            self.tags = tags
+            self.body = body
+            self.isAIEnhanced = isAIEnhanced
+            self.promptID = promptID
+        }
     }
 
     struct SmartNotesListResponse: Codable, Equatable {
@@ -109,6 +136,23 @@ enum RemoteAPI {
         let note: SmartNoteResponse
         let rawText: String
         let enhancementError: String?
+    }
+
+    enum PromptKind: String, Codable, Equatable {
+        case dictation
+        case smartNote
+    }
+
+    struct PromptResponse: Codable, Equatable {
+        let id: String
+        let title: String
+        let kind: PromptKind
+        let icon: String
+        let isBuiltIn: Bool
+    }
+
+    struct PromptsResponse: Codable, Equatable {
+        let prompts: [PromptResponse]
     }
 
     private struct ErrorResponse: Encodable {

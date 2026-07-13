@@ -41,6 +41,7 @@ class RemoteClient {
         audio: ByteArray,
         enhance: Boolean,
         inputContext: InputFieldContext? = null,
+        promptId: String? = null,
     ): String {
         val requestId = UUID.randomUUID().toString()
         val startedAt = SystemClock.elapsedRealtime()
@@ -52,18 +53,46 @@ class RemoteClient {
             encodeInputFieldContextHeader(inputContext, enhance)?.let {
                 setRequestProperty("X-FluidVoice-Input-Context", it)
             }
+            promptId?.let { setRequestProperty("X-FluidVoice-Dictation-Prompt-ID", it) }
             setRequestProperty("X-Request-ID", requestId)
         }
         Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt} bytes=${response.size}")
         return JSONObject(String(response)).getString("finalText")
     }
 
-    fun captureNote(connection: CredentialStore.Connection, audio: ByteArray, enhance: Boolean): SmartNoteCapture {
+    fun captureNote(
+        connection: CredentialStore.Connection,
+        audio: ByteArray,
+        enhance: Boolean,
+        promptId: String = "default",
+    ): SmartNoteCapture {
         val requestId = UUID.randomUUID().toString()
         val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/notes", body = audio) {
             setRequestProperty("Content-Type", "audio/mp4")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
             setRequestProperty("X-FluidVoice-Enhance", enhance.toString())
+            setRequestProperty("X-FluidVoice-Note-Prompt-ID", promptId)
+            setRequestProperty("X-Request-ID", requestId)
+        }
+        return SmartNoteCapture.parse(String(response))
+    }
+
+    fun continueNote(
+        connection: CredentialStore.Connection,
+        noteId: String,
+        audio: ByteArray,
+        promptId: String = "default",
+    ): SmartNoteCapture {
+        val requestId = UUID.randomUUID().toString()
+        val response = request(
+            connection.baseUrl,
+            connection.fingerprint,
+            "/remote/v1/notes/$noteId/messages",
+            body = audio,
+        ) {
+            setRequestProperty("Content-Type", "audio/mp4")
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+            setRequestProperty("X-FluidVoice-Note-Prompt-ID", promptId)
             setRequestProperty("X-Request-ID", requestId)
         }
         return SmartNoteCapture.parse(String(response))
@@ -79,6 +108,18 @@ class RemoteClient {
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
         }
         return SmartNote.parseList(String(response))
+    }
+
+    fun listPrompts(connection: CredentialStore.Connection): List<RemotePrompt> {
+        val response = request(
+            baseUrl = connection.baseUrl,
+            fingerprint = connection.fingerprint,
+            path = "/remote/v1/prompts",
+            method = "GET",
+        ) {
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+        }
+        return RemotePrompt.parseList(String(response))
     }
 
     fun deleteNote(connection: CredentialStore.Connection, noteId: String) {

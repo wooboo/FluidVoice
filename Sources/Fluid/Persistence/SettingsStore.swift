@@ -74,6 +74,7 @@ final class SettingsStore: ObservableObject {
 
     enum PromptMode: String, Codable, CaseIterable, Identifiable {
         case dictate
+        case smartNote
         case edit
         case write // legacy persisted value (decoded as .edit)
         case rewrite // legacy persisted value (decoded as .edit)
@@ -83,13 +84,15 @@ final class SettingsStore: ObservableObject {
         }
 
         static var visiblePromptModes: [PromptMode] {
-            [.dictate, .edit]
+            [.dictate, .smartNote]
         }
 
         var normalized: PromptMode {
             switch self {
             case .dictate:
                 return .dictate
+            case .smartNote:
+                return .smartNote
             case .edit, .write, .rewrite:
                 return .edit
             }
@@ -99,6 +102,8 @@ final class SettingsStore: ObservableObject {
             switch self.normalized {
             case .dictate:
                 return "Dictate"
+            case .smartNote:
+                return "Smart Notes"
             case .edit:
                 return "Edit"
             case .write, .rewrite:
@@ -112,6 +117,8 @@ final class SettingsStore: ObservableObject {
             switch raw {
             case "dictate":
                 self = .dictate
+            case "smartnote", "smart-note", "smart_note":
+                self = .smartNote
             case "edit", "write", "rewrite":
                 self = .edit
             default:
@@ -148,11 +155,36 @@ final class SettingsStore: ObservableObject {
         case profile(String)
     }
 
+    enum PromptIcon: String, Codable, CaseIterable, Identifiable {
+        case waveform
+        case waveformSparkles = "waveform-sparkles"
+        case document
+        case documentSparkles = "document-sparkles"
+        case list
+
+        var id: String { self.rawValue }
+
+        var displayName: String {
+            switch self {
+            case .waveform: return "Waveform"
+            case .waveformSparkles: return "AI waveform"
+            case .document: return "Document"
+            case .documentSparkles: return "AI document"
+            case .list: return "List"
+            }
+        }
+
+        static func defaultIcon(for mode: PromptMode) -> Self {
+            mode.normalized == .dictate ? .waveformSparkles : .documentSparkles
+        }
+    }
+
     struct DictationPromptProfile: Codable, Identifiable, Hashable {
         let id: String
         var name: String
         var prompt: String
         var mode: PromptMode
+        var icon: PromptIcon
         var includeContext: Bool
         var createdAt: Date
         var updatedAt: Date
@@ -162,6 +194,7 @@ final class SettingsStore: ObservableObject {
             case name
             case prompt
             case mode
+            case icon
             case includeContext
             case createdAt
             case updatedAt
@@ -172,6 +205,7 @@ final class SettingsStore: ObservableObject {
             name: String,
             prompt: String,
             mode: PromptMode = .dictate,
+            icon: PromptIcon? = nil,
             includeContext: Bool = false,
             createdAt: Date = Date(),
             updatedAt: Date = Date()
@@ -180,6 +214,7 @@ final class SettingsStore: ObservableObject {
             self.name = name
             self.prompt = prompt
             self.mode = mode
+            self.icon = icon ?? PromptIcon.defaultIcon(for: mode)
             self.includeContext = includeContext
             self.createdAt = createdAt
             self.updatedAt = updatedAt
@@ -191,6 +226,8 @@ final class SettingsStore: ObservableObject {
             self.name = try container.decode(String.self, forKey: .name)
             self.prompt = try container.decode(String.self, forKey: .prompt)
             self.mode = try (container.decodeIfPresent(PromptMode.self, forKey: .mode) ?? .dictate).normalized
+            self.icon = try container.decodeIfPresent(PromptIcon.self, forKey: .icon)
+                ?? (self.id == "shopping-list" ? .list : PromptIcon.defaultIcon(for: self.mode))
             self.includeContext = try container.decodeIfPresent(Bool.self, forKey: .includeContext) ?? false
             self.createdAt = try container.decode(Date.self, forKey: .createdAt)
             self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
@@ -435,7 +472,9 @@ final class SettingsStore: ObservableObject {
         }
         if key.hasPrefix("profile:") {
             let id = String(key.dropFirst("profile:".count))
-            guard self.dictationPromptProfiles.contains(where: { $0.id == id && $0.mode.normalized == .dictate }) else { return nil }
+            guard id == SmartNoteCaptureService.defaultPromptID ||
+                    self.dictationPromptProfiles.contains(where: { $0.id == id })
+            else { return nil }
             return .profile(id)
         }
         return nil
@@ -446,6 +485,19 @@ final class SettingsStore: ObservableObject {
             return DictationPromptConfiguration()
         }
         return self.dictationPromptConfigurations[key] ?? DictationPromptConfiguration()
+    }
+
+    /// Resolves AI settings for a prompt explicitly selected by a remote client.
+    /// Prompt-specific settings win; prompts without an override inherit the
+    /// Built-in Default configuration instead of the unrelated global Capture state.
+    func remoteAIConfiguration(promptID: String?) -> DictationPromptConfiguration {
+        if let promptID = promptID?.trimmingCharacters(in: .whitespacesAndNewlines), !promptID.isEmpty {
+            let promptConfiguration = self.dictationPromptConfiguration(for: .profile(promptID))
+            if !promptConfiguration.providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return promptConfiguration
+            }
+        }
+        return self.dictationPromptConfiguration(for: .default)
     }
 
     func setDictationPromptConfiguration(_ configuration: DictationPromptConfiguration, for selection: DictationPromptSelection) {
@@ -483,7 +535,9 @@ final class SettingsStore: ObservableObject {
             }
             if key.hasPrefix("profile:") {
                 let id = String(key.dropFirst("profile:".count))
-                guard self.dictationPromptProfiles.contains(where: { $0.id == id && $0.mode.normalized == .dictate }) else { return nil }
+                guard id == SmartNoteCaptureService.defaultPromptID ||
+                        self.dictationPromptProfiles.contains(where: { $0.id == id })
+                else { return nil }
                 return (.profile(id), shortcut)
             }
             return nil
@@ -546,6 +600,8 @@ final class SettingsStore: ObservableObject {
             if self.selectedDictationPromptID == PrivateAIProviderPromptFormat.promptSelectionID,
                !PrivateAIProviderPromptFormat.isAvailable(settings: self) { return nil }
             return self.selectedDictationPromptID
+        case .smartNote:
+            return nil
         case .edit:
             return self.selectedEditPromptID
         case .write, .rewrite:
@@ -593,6 +649,8 @@ final class SettingsStore: ObservableObject {
         switch mode.normalized {
         case .dictate:
             return self.isDictationPromptOff
+        case .smartNote:
+            return false
         case .edit, .write, .rewrite:
             return self.isEditPromptOff
         }
@@ -602,6 +660,8 @@ final class SettingsStore: ObservableObject {
         switch mode.normalized {
         case .dictate:
             self.setDictationPromptSelection(isOff ? .off : .default)
+        case .smartNote:
+            break
         case .edit, .write, .rewrite:
             self.isEditPromptOff = isOff
         }
@@ -663,6 +723,8 @@ final class SettingsStore: ObservableObject {
             } else {
                 self.setDictationPromptSelection(.default)
             }
+        case .smartNote:
+            break
         case .edit:
             self.isEditPromptOff = false
             self.selectedEditPromptID = id
@@ -792,6 +854,24 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// Optional override for the built-in general Smart Note prompt.
+    var defaultSmartNotePromptOverride: String? {
+        get {
+            guard self.defaults.object(forKey: Keys.defaultSmartNotePromptOverride) != nil else {
+                return nil
+            }
+            return self.defaults.string(forKey: Keys.defaultSmartNotePromptOverride) ?? ""
+        }
+        set {
+            objectWillChange.send()
+            if let value = newValue {
+                self.defaults.set(value, forKey: Keys.defaultSmartNotePromptOverride)
+            } else {
+                self.defaults.removeObject(forKey: Keys.defaultSmartNotePromptOverride)
+            }
+        }
+    }
+
     /// Optional override for the built-in default edit system prompt.
     var defaultEditPromptOverride: String? {
         get {
@@ -835,6 +915,8 @@ final class SettingsStore: ObservableObject {
         switch mode.normalized {
         case .dictate:
             return self.defaultDictationPromptOverride
+        case .smartNote:
+            return self.defaultSmartNotePromptOverride
         case .edit:
             return self.defaultEditPromptOverride
         case .write, .rewrite:
@@ -846,6 +928,8 @@ final class SettingsStore: ObservableObject {
         switch mode.normalized {
         case .dictate:
             self.defaultDictationPromptOverride = value
+        case .smartNote:
+            self.defaultSmartNotePromptOverride = value
         case .edit:
             self.defaultEditPromptOverride = value
         case .write, .rewrite:
@@ -902,11 +986,31 @@ final class SettingsStore: ObservableObject {
         switch mode.normalized {
         case .dictate:
             return self.baseDictationPromptText()
+        case .smartNote:
+            return self.baseSmartNotePromptText()
         case .edit:
             return self.baseEditPromptText()
         case .write, .rewrite:
             return self.baseEditPromptText()
         }
+    }
+
+    static func baseSmartNotePromptText() -> String {
+        """
+        Turn the voice transcript into a useful structured note without inventing facts or adding advice.
+        Remove fillers and false starts, preserve the speaker's meaning, and use concise Markdown in the body.
+        Choose one short category and up to five lowercase tags.
+        Prefer reusing existing tags when they fit. Create a new tag only when none of the existing tags describe the note.
+        """
+    }
+
+    static func smartNoteOutputContractText() -> String {
+        """
+        OUTPUT CONTRACT — this is mandatory for every Smart Notes prompt:
+        Return only one valid JSON object with exactly these keys and value types:
+        {"title":"Short descriptive title","category":"Category","tags":["lowercase-tag"],"body":"Markdown note body"}
+        Do not add keys, commentary, a preamble, or a code fence. Escape newlines and quotation marks so the response parses as JSON.
+        """
     }
 
     /// Built-in default dictation prompt body that users may view/edit.
@@ -949,6 +1053,27 @@ final class SettingsStore: ObservableObject {
         """
     }
 
+    static func defaultSmartNotePromptBodyText() -> String {
+        """
+        Create a general-purpose Smart Note.
+        Use concise Markdown. Keep important details, dates, names, decisions, and next actions when present.
+        """
+    }
+
+    static func defaultShoppingListPromptBodyText() -> String {
+        """
+        Create or update a structured shopping list note.
+        The body must always contain exactly two top-level Markdown sections, in this order: "## To buy" and "## Purchased".
+        Use ordinary Markdown list items beginning with "- ". Never use checkboxes or checklist syntax.
+        Put every product that still needs to be bought under "## To buy" and every product already bought under "## Purchased".
+        When the user says that a product was bought, remove it from "## To buy" and move it to "## Purchased". Never leave the same product in both sections.
+        Preserve quantities, units, brands, and useful grouping stated by the user. Keep either section present even when it is empty.
+        If the user removes an item, omit it from both sections.
+        Do not invent products, quantities, prices, stores, or advice.
+        The category must be "Shopping List" and tags must include "shopping-list".
+        """
+    }
+
     /// Legacy wrappers retained for compatibility.
     static func defaultWritePromptBodyText() -> String {
         self.defaultEditPromptBodyText()
@@ -963,6 +1088,8 @@ final class SettingsStore: ObservableObject {
         switch mode.normalized {
         case .dictate:
             return self.defaultDictationPromptBodyText()
+        case .smartNote:
+            return self.defaultSmartNotePromptBodyText()
         case .edit:
             return self.defaultEditPromptBodyText()
         case .write, .rewrite:
@@ -980,15 +1107,22 @@ final class SettingsStore: ObservableObject {
         let base = self.basePromptText(for: mode).trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // If body already starts with base, return as-is to avoid double-prepending.
+        // If body already starts with base, avoid double-prepending.
         if trimmedBody.lowercased().hasPrefix(base.lowercased()) {
+            if mode.normalized == .smartNote,
+               !trimmedBody.contains(self.smartNoteOutputContractText())
+            {
+                return "\(trimmedBody)\n\n\(self.smartNoteOutputContractText())"
+            }
             return trimmedBody
         }
 
-        // If body is empty, return just the base.
-        guard !trimmedBody.isEmpty else { return base }
+        let combined = trimmedBody.isEmpty ? base : "\(base)\n\n\(trimmedBody)"
+        if mode.normalized == .smartNote {
+            return "\(combined)\n\n\(self.smartNoteOutputContractText())"
+        }
 
-        return "\(base)\n\n\(trimmedBody)"
+        return combined
     }
 
     /// Remove the hidden base prompt prefix if it was persisted previously.
@@ -2930,6 +3064,7 @@ final class SettingsStore: ObservableObject {
             selectedEditPromptID: self.selectedEditPromptID,
             editPromptRoutingScope: self.editPromptRoutingScope,
             defaultDictationPromptOverride: self.defaultDictationPromptOverride,
+            defaultSmartNotePromptOverride: self.defaultSmartNotePromptOverride,
             defaultEditPromptOverride: self.defaultEditPromptOverride
         )
     }
@@ -3057,6 +3192,7 @@ final class SettingsStore: ObservableObject {
         self.editPromptRoutingScope = payload.editPromptRoutingScope ?? .allApps
         self.selectedEditPromptID = payload.selectedEditPromptID
         self.defaultDictationPromptOverride = payload.defaultDictationPromptOverride
+        self.defaultSmartNotePromptOverride = payload.defaultSmartNotePromptOverride
         self.defaultEditPromptOverride = payload.defaultEditPromptOverride
         self.promptModeSelectedPromptID = payload.promptModeSelectedPromptID
         self.isSecondaryDictationPromptOff = payload.secondaryDictationPromptOff ?? false
@@ -3229,6 +3365,21 @@ final class SettingsStore: ObservableObject {
             self.dictationPromptProfiles = normalizedProfiles
         }
 
+        if self.dictationPromptProfiles.contains(where: { $0.id == "shopping-list" && $0.mode.normalized == .smartNote }) == false {
+            var profiles = self.dictationPromptProfiles
+            profiles.append(DictationPromptProfile(
+                id: "shopping-list",
+                name: "Shopping List",
+                prompt: Self.defaultShoppingListPromptBodyText(),
+                mode: .smartNote,
+                icon: .list,
+                includeContext: false,
+                createdAt: Date(),
+                updatedAt: Date()
+            ))
+            self.dictationPromptProfiles = profiles
+        }
+
         let privateAIPromptID = PrivateAIProviderPromptFormat.promptSelectionID
 
         if let id = self.selectedDictationPromptID,
@@ -3253,6 +3404,7 @@ final class SettingsStore: ObservableObject {
 
         let validPromptIDsByMode: [PromptMode: Set<String>] = [
             .dictate: Set(self.dictationPromptProfiles.filter { $0.mode.normalized == .dictate }.map(\.id)),
+            .smartNote: Set(self.dictationPromptProfiles.filter { $0.mode.normalized == .smartNote }.map(\.id)),
             .edit: Set(self.dictationPromptProfiles.filter { $0.mode.normalized == .edit }.map(\.id)),
         ]
 
@@ -4646,6 +4798,7 @@ private extension SettingsStore {
         // ""    => use empty system prompt
         // other => use custom default prompt text
         static let defaultDictationPromptOverride = "DefaultDictationPromptOverride"
+        static let defaultSmartNotePromptOverride = "DefaultSmartNotePromptOverride"
         static let defaultEditPromptOverride = "DefaultEditPromptOverride"
         static let defaultWritePromptOverride = "DefaultWritePromptOverride" // legacy fallback key
         static let defaultRewritePromptOverride = "DefaultRewritePromptOverride" // legacy fallback key

@@ -69,6 +69,7 @@ class OverlayService : Service() {
     private var attachmentEdge = OverlayEdge.None
     private var attachmentProgress = 0f
     private var attachmentAnimator: ValueAnimator? = null
+    private var refreshOverlayWhenIdle = false
 
     private val amplitudeSampler = object : Runnable {
         override fun run() {
@@ -98,9 +99,12 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            RemotePreferences.setOverlayEnabled(this, false)
-            stopSelf()
+        when (intent?.action) {
+            ACTION_STOP -> {
+                RemotePreferences.setOverlayEnabled(this, false)
+                stopSelf()
+            }
+            ACTION_REFRESH -> refreshOverlayButtons()
         }
         return START_STICKY
     }
@@ -126,6 +130,7 @@ class OverlayService : Service() {
 
     private fun showOverlay() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        captureModeButtons.clear()
         root = FrameLayout(this)
         collapsedButton = buildCollapsedButton()
         expandedPanel = buildExpandedPanel()
@@ -153,7 +158,10 @@ class OverlayService : Service() {
     }
 
     private fun buildCollapsedButton(): LinearLayout = LinearLayout(this).apply {
-        layoutParams = FrameLayout.LayoutParams(dp(COLLAPSED_PANEL_WIDTH_DP), dp(COLLAPSED_PANEL_HEIGHT_DP))
+        val modes = overlayModes()
+        val height = collapsedPanelHeight(modes.size)
+        layoutParams = FrameLayout.LayoutParams(dp(COLLAPSED_PANEL_WIDTH_DP), dp(height))
+        visibility = if (modes.isEmpty()) View.GONE else View.VISIBLE
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
         clipToPadding = false
@@ -167,23 +175,23 @@ class OverlayService : Service() {
         collapsedBackground = attachmentBackground(Color.BLACK, COLLAPSED_BUTTON_GAP_DP)
         background = collapsedBackground
         contentDescription = getString(R.string.overlay_idle)
-        addView(captureModeButton(CaptureMode.Dictation), LinearLayout.LayoutParams(dp(CAPTURE_BUTTON_SIZE_DP), dp(CAPTURE_BUTTON_SIZE_DP)).apply {
-            bottomMargin = dp(6)
-        })
-        addView(
-            captureModeButton(CaptureMode.SmartNote),
-            LinearLayout.LayoutParams(dp(CAPTURE_BUTTON_SIZE_DP), dp(CAPTURE_BUTTON_SIZE_DP)),
-        )
+        modes.forEachIndexed { index, mode ->
+            addView(
+                captureModeButton(mode),
+                LinearLayout.LayoutParams(dp(CAPTURE_BUTTON_SIZE_DP), dp(CAPTURE_BUTTON_SIZE_DP)).apply {
+                    if (index < modes.lastIndex) bottomMargin = dp(COLLAPSED_BUTTON_SPACING_DP)
+                },
+            )
+        }
     }
 
-    private fun captureModeButton(mode: CaptureMode): FrameLayout = FrameLayout(this).apply {
-        val isNote = mode == CaptureMode.SmartNote
-        background = roundedBackground(if (isNote) 0xffa8462c.toInt() else 0xff344363.toInt(), 25f)
-        contentDescription = getString(if (isNote) R.string.overlay_start_note else R.string.overlay_start_dictation)
+    private fun captureModeButton(mode: OverlayPromptMode): FrameLayout = FrameLayout(this).apply {
+        background = roundedBackground(colorFor(mode), CAPTURE_BUTTON_SIZE_DP / 2f)
+        contentDescription = mode.title
         isClickable = true
         isFocusable = true
         addView(ImageView(context).apply {
-            setImageResource(if (isNote) R.drawable.ic_note else R.drawable.ic_dictation)
+            setImageResource(iconFor(mode))
             scaleType = ImageView.ScaleType.CENTER
         }, FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
         setOnClickListener { beginRecording(mode) }
@@ -245,13 +253,11 @@ class OverlayService : Service() {
             }
         }
 
-    private fun beginRecording(mode: CaptureMode) {
+    private fun beginRecording(mode: OverlayPromptMode) {
         if (state != OverlayState.Idle) return
         val next = OverlayReducer.reduce(state, OverlayAction.Start(mode))
-        inputFieldContext = if (mode == CaptureMode.Dictation) {
-            FluidAccessibilityService.captureTarget(
-                includeContext = RemotePreferences.isAiEnhancementEnabled(this),
-            )
+        inputFieldContext = if (mode.kind == RemotePromptKind.Dictation) {
+            FluidAccessibilityService.captureTarget(includeContext = !mode.isWithoutAI)
         } else {
             null
         }
@@ -266,7 +272,7 @@ class OverlayService : Service() {
                 updateNotification("Listening")
             }
             .onFailure {
-                if (mode == CaptureMode.Dictation) FluidAccessibilityService.clearCapturedTarget()
+                if (mode.kind == RemotePromptKind.Dictation) FluidAccessibilityService.clearCapturedTarget()
                 inputFieldContext = null
                 showError(it.message ?: "Microphone is unavailable")
             }
@@ -299,33 +305,32 @@ class OverlayService : Service() {
         }
         state = OverlayReducer.reduce(state, OverlayAction.Confirm)
         renderState()
-        updateNotification(if (recording.mode == CaptureMode.SmartNote) "Saving note" else "Transcribing")
+        updateNotification(if (recording.mode.isSmartNote) "Saving note" else "Transcribing")
         val connection = CredentialStore(this).load()
         if (connection == null) {
             showError("Pair with your Mac first")
             return
         }
         val mode = recording.mode
-        val enhance = when (mode) {
-            CaptureMode.Dictation -> RemotePreferences.isAiEnhancementEnabled(this)
-            CaptureMode.SmartNote -> RemotePreferences.isSmartNotesEnhancementEnabled(this)
-        }
-        val context = inputFieldContext.takeIf { mode == CaptureMode.Dictation && enhance }
+        val enhance = !mode.isWithoutAI
+        val context = inputFieldContext.takeIf { mode.kind == RemotePromptKind.Dictation && enhance }
         val preparation = preconnectThread.also { preconnectThread = null }
         thread(name = "fluidvoice-overlay-capture") {
             preparation?.join(PRECONNECT_WAIT_MS)
             runCatching {
-                when (mode) {
-                    CaptureMode.Dictation -> OverlayResult.Dictation(client.dictate(
+                when (mode.kind) {
+                    RemotePromptKind.Dictation -> OverlayResult.Dictation(client.dictate(
                         connection,
                         audio,
                         enhance,
                         context,
+                        if (mode.isDictationWithoutAI) null else mode.id,
                     ))
-                    CaptureMode.SmartNote -> OverlayResult.Note(client.captureNote(
+                    RemotePromptKind.SmartNote -> OverlayResult.Note(client.captureNote(
                         connection,
                         audio,
                         enhance,
+                        mode.id,
                     ))
                 }
             }
@@ -351,6 +356,7 @@ class OverlayService : Service() {
                     message,
                     if (enhancementError == null) Toast.LENGTH_SHORT else Toast.LENGTH_LONG,
                 ).show()
+                openNote(result.capture.note.id)
                 state = OverlayReducer.reduce(state, OverlayAction.Complete)
                 renderState()
                 updateNotification("Ready to capture")
@@ -384,20 +390,72 @@ class OverlayService : Service() {
         updateNotification("Action needed")
     }
 
+    private fun refreshOverlayButtons() {
+        if (state != OverlayState.Idle) {
+            refreshOverlayWhenIdle = true
+            return
+        }
+        if (!::root.isInitialized) return
+        refreshOverlayWhenIdle = false
+        runCatching { windowManager.removeView(root) }
+        showOverlay()
+    }
+
+    private fun openNote(noteId: String) {
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .setAction(MainActivity.ACTION_OPEN_NOTE)
+                .putExtra(MainActivity.EXTRA_NOTE_ID, noteId)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+        )
+    }
+
+    private fun overlayModes(): List<OverlayPromptMode> {
+        val prompts = RemotePreferences.cachedPrompts(this).ifEmpty { RemotePrompt.fallbackPrompts }
+        return visibleOverlayPromptModes(prompts, RemotePreferences.hiddenOverlayPromptIds(this))
+    }
+
+    private fun collapsedPanelHeight(): Int = collapsedPanelHeight(overlayModes().size)
+
+    private fun collapsedPanelHeight(modeCount: Int): Int =
+        COLLAPSED_VERTICAL_PADDING_DP +
+            (modeCount * CAPTURE_BUTTON_SIZE_DP) +
+            (maxOf(0, modeCount - 1) * COLLAPSED_BUTTON_SPACING_DP)
+
+    private fun iconFor(mode: OverlayPromptMode): Int = when (mode.icon) {
+        "waveform" -> R.drawable.ic_dictation
+        "waveform-sparkles" -> R.drawable.ic_dictation_sparkles
+        "document" -> R.drawable.ic_note
+        "document-sparkles" -> R.drawable.ic_note_sparkles
+        "list" -> R.drawable.ic_list
+        else -> if (mode.kind == RemotePromptKind.Dictation) R.drawable.ic_dictation_sparkles else R.drawable.ic_note_sparkles
+    }
+
+    private fun colorFor(mode: OverlayPromptMode): Int = when {
+        mode.icon == "list" -> 0xff2e8b68.toInt()
+        mode.kind == RemotePromptKind.Dictation -> 0xff344363.toInt()
+        else -> 0xffa8462c.toInt()
+    }
+
+    private fun descriptionFor(mode: OverlayPromptMode): Int = when {
+        mode.icon == "list" -> R.string.overlay_start_shopping_list
+        mode.kind == RemotePromptKind.Dictation -> R.string.overlay_start_dictation
+        else -> R.string.overlay_start_note
+    }
+
     private fun renderState() {
         val idle = state == OverlayState.Idle
         val recording = state as? OverlayState.Recording
         val processing = state as? OverlayState.Processing
         applyPosition(idle)
-        collapsedButton.visibility = if (idle) View.VISIBLE else View.GONE
+        collapsedButton.visibility = if (idle && captureModeButtons.isNotEmpty()) View.VISIBLE else View.GONE
         expandedPanel.visibility = if (idle) View.GONE else View.VISIBLE
         modeIcon.visibility = if (recording != null || processing != null) View.VISIBLE else View.GONE
         val mode = recording?.mode ?: processing?.mode
-        modeIcon.setImageResource(if (mode == CaptureMode.SmartNote) R.drawable.ic_note else R.drawable.ic_dictation)
-        modeIcon.background = roundedBackground(
-            if (mode == CaptureMode.SmartNote) 0xffa8462c.toInt() else 0xff344363.toInt(),
-            18f,
-        )
+        if (mode != null) {
+            modeIcon.setImageResource(iconFor(mode))
+            modeIcon.background = roundedBackground(colorFor(mode), 18f)
+        }
         waveform.visibility = if (recording != null) View.VISIBLE else View.GONE
         waveform.setRecording(recording != null)
         waveform.setProcessing(processing != null)
@@ -412,7 +470,7 @@ class OverlayService : Service() {
         }
         rejectButton.visibility = if (processing != null) View.GONE else View.VISIBLE
         confirmButton.visibility = if (recording != null) View.VISIBLE else View.GONE
-        confirmButton.contentDescription = if (recording?.mode == CaptureMode.SmartNote) {
+        confirmButton.contentDescription = if (recording?.mode?.isSmartNote == true) {
             getString(R.string.overlay_confirm_note)
         } else {
             getString(R.string.overlay_confirm)
@@ -431,6 +489,11 @@ class OverlayService : Service() {
         }
         windowManager.updateViewLayout(root, layoutParams)
         scheduleMeasuredPosition()
+        if (idle && refreshOverlayWhenIdle) {
+            root.post {
+                if (state == OverlayState.Idle) refreshOverlayButtons()
+            }
+        }
     }
 
     private fun installDragGesture(view: View) {
@@ -516,7 +579,7 @@ class OverlayService : Service() {
             x = requestedX,
             y = idleY,
             overlayWidth = dp(COLLAPSED_PANEL_WIDTH_DP),
-            overlayHeight = dp(COLLAPSED_PANEL_HEIGHT_DP),
+            overlayHeight = dp(collapsedPanelHeight()),
             viewportWidth = viewport.width,
             viewportHeight = viewport.height,
             edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
@@ -532,7 +595,7 @@ class OverlayService : Service() {
         val viewport = currentViewportSize()
         val idlePosition = topRightOverlayPosition(
             overlayWidth = dp(COLLAPSED_PANEL_WIDTH_DP),
-            overlayHeight = dp(COLLAPSED_PANEL_HEIGHT_DP),
+            overlayHeight = dp(collapsedPanelHeight()),
             viewportWidth = viewport.width,
             viewportHeight = viewport.height,
             edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
@@ -550,7 +613,7 @@ class OverlayService : Service() {
             x = idleX,
             y = idleY,
             overlayWidth = dp(if (idle) COLLAPSED_PANEL_WIDTH_DP else EXPANDED_PANEL_WIDTH_DP),
-            overlayHeight = dp(if (idle) COLLAPSED_PANEL_HEIGHT_DP else EXPANDED_PANEL_HEIGHT_DP),
+            overlayHeight = dp(if (idle) collapsedPanelHeight() else EXPANDED_PANEL_HEIGHT_DP),
             viewportWidth = viewport.width,
             viewportHeight = viewport.height,
             edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
@@ -784,12 +847,14 @@ class OverlayService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.fluidvoice.remote.STOP_OVERLAY"
+        const val ACTION_REFRESH = "com.fluidvoice.remote.REFRESH_OVERLAY"
         private const val CHANNEL_ID = "fluidvoice-overlay"
         private const val NOTIFICATION_ID = 7301
         private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
         private const val COLLAPSED_PANEL_WIDTH_DP = 60
-        private const val COLLAPSED_PANEL_HEIGHT_DP = 134
+        private const val COLLAPSED_VERTICAL_PADDING_DP = 32
+        private const val COLLAPSED_BUTTON_SPACING_DP = 6
         private const val CAPTURE_BUTTON_SIZE_DP = 48
         private const val EXPANDED_PANEL_WIDTH_DP = 294
         private const val EXPANDED_PANEL_HEIGHT_DP = 84

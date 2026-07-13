@@ -208,6 +208,8 @@ struct ContentView: View {
     @State private var promptModeOverrideText: String? // System prompt text to use when in prompt mode
     @State private var activeDictationShortcutSlot: SettingsStore.DictationShortcutSlot? = nil
     @State private var activeRecordingMode: ActiveRecordingMode = .none
+    @State private var activeSmartNotePromptID: String? = nil
+    @State private var activeSmartNoteContinuationID: UUID? = nil
     @State private var pendingAIReprocessText: String? = nil
     @State private var activeShortcutRecordingTarget: ShortcutRecordingTarget? = nil
     @State private var currentRecordingModifierKeyCodes: Set<UInt16> = []
@@ -1004,6 +1006,8 @@ struct ContentView: View {
             self.selectedSidebarItem = .customDictionary
         case .preferences:
             self.selectedSidebarItem = .preferences
+        case .smartNotes:
+            self.selectedSidebarItem = .smartNotes
         }
     }
 
@@ -1333,7 +1337,9 @@ struct ContentView: View {
         case .history:
             return AnyView(TranscriptionHistoryView())
         case .smartNotes:
-            return AnyView(SmartNotesView())
+            return AnyView(SmartNotesView(asr: self.asr, onDictate: { note in
+                self.toggleSmartNoteRecording(for: note)
+            }))
         }
     }
 
@@ -2110,6 +2116,8 @@ struct ContentView: View {
         let wasRewriteMode = modeAtStop == .edit || self.isRecordingForRewrite
         let wasCommandMode = modeAtStop == .command || self.isRecordingForCommand
         let wasSmartNotesMode = modeAtStop == .smartNotes
+        let smartNotePromptIDAtStop = self.activeSmartNotePromptID
+        let smartNoteContinuationIDAtStop = self.activeSmartNoteContinuationID
         let activeDictationSlot = self.currentDictationShortcutSlot(for: modeAtStop)
         let promptOverride = self.promptModeOverrideText
         let promptTest = DictationPromptTestCoordinator.shared
@@ -2179,7 +2187,11 @@ struct ContentView: View {
         // Smart Notes is a dedicated output route and must never be redirected into
         // prompt testing, typing, clipboard, or transcription history.
         if wasSmartNotesMode {
-            await self.captureSmartNote(from: transcribedText)
+            await self.captureSmartNote(
+                from: transcribedText,
+                promptID: smartNotePromptIDAtStop ?? SmartNoteCaptureService.defaultPromptID,
+                continuingNoteID: smartNoteContinuationIDAtStop
+            )
             return
         }
 
@@ -3005,30 +3017,33 @@ struct ContentView: View {
         }
     }
 
-    private func captureSmartNote(from transcript: String) async {
+    private func captureSmartNote(from transcript: String, promptID: String, continuingNoteID: UUID? = nil) async {
         self.menuBarManager.setProcessing(true)
         NotchOverlayManager.shared.updateTranscriptionText("Saving note")
 
         do {
-            let note = try SmartNotesStore.shared.capture(rawText: transcript)
-
-            if SettingsStore.shared.smartNotesAIEnhancementEnabled {
+            if promptID != SmartNoteCaptureService.noAIPromptID {
                 NotchOverlayManager.shared.updateTranscriptionText("Organizing note")
-                do {
-                    let response = try await self.processTextWithAI(
-                        transcript,
-                        overrideSystemPrompt: Self.smartNotesEnhancementPrompt
-                    )
-                    let enhancement = try SmartNoteEnhancement.parseAIResponse(response)
-                    try SmartNotesStore.shared.apply(enhancement, to: note.id)
-                } catch {
-                    DebugLogger.shared.error(
-                        "Smart Notes AI enrichment failed; raw note preserved: \(error.localizedDescription)",
-                        source: "ContentView"
-                    )
-                    NotificationService.showSmartNotesFallback(error: error.localizedDescription)
-                }
             }
+            let response = if let continuingNoteID {
+                try await SmartNoteCaptureService.shared.continueNote(
+                    id: continuingNoteID,
+                    rawText: transcript,
+                    promptID: promptID
+                )
+            } else {
+                try await SmartNoteCaptureService.shared.capture(
+                    rawText: transcript,
+                    enhance: promptID != SmartNoteCaptureService.noAIPromptID,
+                    promptID: promptID
+                )
+            }
+            if let enhancementError = response.enhancementError {
+                NotificationService.showSmartNotesFallback(error: enhancementError)
+            }
+            SmartNotesStore.shared.selectedNoteID = UUID(uuidString: response.note.id)
+            self.selectedSidebarItem = .smartNotes
+            self.menuBarManager.openSmartNotesFromUI()
 
             NotchOverlayManager.shared.updateTranscriptionText("Note saved")
             try? await Task.sleep(nanoseconds: 450_000_000)
@@ -3044,9 +3059,11 @@ struct ContentView: View {
         await self.menuBarManager.finishProcessingAndHideOverlay()
     }
 
-    private static let smartNotesEnhancementPrompt = SmartNoteCaptureService.enhancementPrompt
-
     private func setActiveRecordingMode(_ mode: ActiveRecordingMode) {
+        if mode != .smartNotes {
+            self.activeSmartNotePromptID = nil
+            self.activeSmartNoteContinuationID = nil
+        }
         if mode != .dictate, mode != .promptMode {
             self.clearActiveDictationShortcutState()
         }
@@ -3082,6 +3099,12 @@ struct ContentView: View {
         case .dictate:
             guard self.activeRecordingMode != .dictate || NotchContentState.shared.mode != .dictation else { return }
             self.setActiveRecordingMode(.dictate)
+            self.rewriteModeService.clearState()
+            self.menuBarManager.setOverlayMode(.dictation)
+        case .smartNote:
+            guard self.activeRecordingMode != .smartNotes || NotchContentState.shared.mode != .dictation else { return }
+            self.setActiveRecordingMode(.smartNotes)
+            self.activeSmartNotePromptID = SmartNoteCaptureService.defaultPromptID
             self.rewriteModeService.clearState()
             self.menuBarManager.setOverlayMode(.dictation)
         case .edit:
@@ -3402,7 +3425,16 @@ struct ContentView: View {
             },
             promptSelectionCallback: { selection in
                 DebugLogger.shared.info("Prompt selection shortcut triggered", source: "ContentView")
-                self.beginDictationRecording(for: selection, mode: .promptMode)
+                if case let .profile(promptID) = selection,
+                   promptID == SmartNoteCaptureService.defaultPromptID ||
+                    SettingsStore.shared.dictationPromptProfiles.contains(where: {
+                        $0.id == promptID && $0.mode.normalized == .smartNote
+                    })
+                {
+                    self.beginSmartNoteRecording(promptID: promptID)
+                } else {
+                    self.beginDictationRecording(for: selection, mode: .promptMode)
+                }
             },
             commandModeCallback: {
                 DebugLogger.shared.info("Command mode triggered", source: "ContentView")
@@ -3466,27 +3498,13 @@ struct ContentView: View {
                 }
             },
             smartNotesCallback: {
-                self.captureRecordingContext()
-                self.setActiveRecordingMode(.smartNotes)
-                self.menuBarManager.setOverlayMode(.dictation)
-
-                guard !self.asr.isRunning else { return }
-                self.advanceOverlayLifecycle()
-                TranscriptionSoundPlayer.shared.playStartSound()
-                Task {
-                    await self.asr.start(onCaptureStarted: {
-                        self.menuBarManager.showRecordingOverlayImmediately()
-                    })
-                    if !self.asr.isRunning {
-                        self.menuBarManager.hideRecordingOverlayImmediately(reason: "smart_notes_start_failed")
-                    }
-                }
+                self.beginSmartNoteRecording(promptID: SmartNoteCaptureService.defaultPromptID)
             },
             isDictateRecordingProvider: {
                 self.activeRecordingMode == .dictate
             },
             isPromptModeRecordingProvider: {
-                self.activeRecordingMode == .promptMode
+                self.activeRecordingMode == .promptMode || self.activeRecordingMode == .smartNotes
             },
             isCommandRecordingProvider: {
                 self.activeRecordingMode == .command
@@ -3821,6 +3839,41 @@ extension ContentView {
                 source: "AppBenchmark"
             )
         }
+    }
+
+    private func beginSmartNoteRecording(promptID: String, continuingNoteID: UUID? = nil) {
+        self.captureRecordingContext()
+        self.setActiveRecordingMode(.smartNotes)
+        self.activeSmartNotePromptID = promptID
+        self.activeSmartNoteContinuationID = continuingNoteID
+        self.menuBarManager.setOverlayMode(.dictation)
+
+        guard !self.asr.isRunning else { return }
+        self.advanceOverlayLifecycle()
+        TranscriptionSoundPlayer.shared.playStartSound()
+        Task {
+            await self.asr.start(onCaptureStarted: {
+                self.menuBarManager.showRecordingOverlayImmediately()
+            })
+            if !self.asr.isRunning {
+                self.menuBarManager.hideRecordingOverlayImmediately(reason: "smart_notes_start_failed")
+            }
+        }
+    }
+
+    private func toggleSmartNoteRecording(for note: SmartNote) {
+        if self.asr.isRunning {
+            guard self.activeRecordingMode == .smartNotes else { return }
+            Task {
+                await self.stopAndProcessTranscription()
+            }
+            return
+        }
+
+        self.beginSmartNoteRecording(
+            promptID: note.promptID ?? SmartNoteCaptureService.defaultPromptID,
+            continuingNoteID: note.id
+        )
     }
 
     private func beginDictationRecording(for selection: SettingsStore.DictationPromptSelection, mode: ActiveRecordingMode) {

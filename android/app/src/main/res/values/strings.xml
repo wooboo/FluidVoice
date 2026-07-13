@@ -5,6 +5,7 @@
     <string name="overlay_idle">FluidVoice Dictation and Smart Note</string>
     <string name="overlay_start_dictation">Start dictation</string>
     <string name="overlay_start_note">Start Smart Note</string>
+    <string name="overlay_start_shopping_list">Start Shopping List note</string>
     <string name="overlay_recording">Recording. Confirm or discard.</string>
     <string name="overlay_processing">Transcribing recording</string>
     <string name="overlay_error">FluidVoice error: %1$s</string>

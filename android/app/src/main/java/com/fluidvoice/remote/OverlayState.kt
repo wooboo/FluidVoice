@@ -2,13 +2,13 @@ package com.fluidvoice.remote
 
 sealed interface OverlayState {
     data object Idle : OverlayState
-    data class Recording(val mode: CaptureMode) : OverlayState
-    data class Processing(val mode: CaptureMode) : OverlayState
+    data class Recording(val mode: OverlayPromptMode) : OverlayState
+    data class Processing(val mode: OverlayPromptMode) : OverlayState
     data class Error(val message: String) : OverlayState
 }
 
 sealed interface OverlayAction {
-    data class Start(val mode: CaptureMode) : OverlayAction
+    data class Start(val mode: OverlayPromptMode) : OverlayAction
     data object Confirm : OverlayAction
     data object Reject : OverlayAction
     data object Complete : OverlayAction

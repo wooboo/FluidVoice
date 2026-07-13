@@ -6,6 +6,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
@@ -47,6 +50,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -80,13 +84,15 @@ data class AppUiState(
     val notesLoading: Boolean = false,
     val notesError: String? = null,
     val selectedNote: SmartNote? = null,
-    val captureMode: CaptureMode = CaptureMode.Dictation,
+    val notesTagFilter: String? = null,
+    val notesTagQuery: String = "",
+    val prompts: List<RemotePrompt> = RemotePrompt.fallbackPrompts,
+    val selectedPromptId: String = RemotePrompt.DICTATION_NO_AI_ID,
+    val hiddenOverlayPromptIds: Set<String> = emptySet(),
     val isRecording: Boolean = false,
     val isProcessing: Boolean = false,
     val audioLevel: Float = 0f,
     val captureMessage: String? = null,
-    val dictationEnhancement: Boolean = true,
-    val notesEnhancement: Boolean = true,
     val overlayRunning: Boolean = false,
     val canDrawOverlays: Boolean = false,
     val accessibilityEnabled: Boolean = false,
@@ -100,15 +106,19 @@ data class AppActions(
     val refreshNotes: () -> Unit,
     val openNote: (SmartNote?) -> Unit,
     val requestDeleteNote: (SmartNote) -> Unit,
+    val setNotesTagFilter: (String?) -> Unit,
+    val setNotesTagQuery: (String) -> Unit,
     val dismissDeleteNote: () -> Unit,
     val confirmDeleteNote: () -> Unit,
-    val setCaptureMode: (CaptureMode) -> Unit,
+    val selectPrompt: (String) -> Unit,
     val startCapture: () -> Unit,
     val confirmCapture: () -> Unit,
     val rejectCapture: () -> Unit,
+    val startNoteConversation: () -> Unit,
+    val confirmNoteConversation: () -> Unit,
+    val rejectNoteConversation: () -> Unit,
     val scanPairingCode: () -> Unit,
-    val setDictationEnhancement: (Boolean) -> Unit,
-    val setNotesEnhancement: (Boolean) -> Unit,
+    val setOverlayPromptVisible: (String, Boolean) -> Unit,
     val toggleOverlay: () -> Unit,
     val openAccessibilitySettings: () -> Unit,
 )
@@ -193,11 +203,18 @@ private fun DeleteNoteDialog(note: SmartNote, deleting: Boolean, error: String?,
 private fun NotesScreen(state: AppUiState, actions: AppActions) {
     AnimatedContent(targetState = state.selectedNote, label = "note-detail") { note ->
         if (note != null) {
-            NoteDetail(
-                note = note,
-                onBack = { actions.openNote(null) },
-                onDelete = { actions.requestDeleteNote(note) },
-            )
+            Box(Modifier.fillMaxSize()) {
+                NoteDetail(
+                    note = note,
+                    onBack = { actions.openNote(null) },
+                    onDelete = { actions.requestDeleteNote(note) },
+                )
+                NoteConversationFloatingControl(
+                    state = state,
+                    actions = actions,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 0.dp, bottom = 20.dp),
+                )
+            }
         } else {
             Column(Modifier.fillMaxSize()) {
                 ScreenHeader(
@@ -218,10 +235,95 @@ private fun NotesScreen(state: AppUiState, actions: AppActions) {
                     state.notesLoading && state.notes.isEmpty() -> NotesLoading()
                     state.notesError != null && state.notes.isEmpty() -> ErrorState(state.notesError, actions.refreshNotes)
                     state.notes.isEmpty() -> EmptyNotes { actions.selectSection(AppSection.Capture) }
-                    else -> NotesList(state.notes, actions.openNote)
+                    else -> {
+                        val filteredNotes = state.notes.filteredByTag(state.notesTagFilter)
+                        NotesTagFilters(
+                            tags = state.notes.allTags(),
+                            selectedTag = state.notesTagFilter,
+                            query = state.notesTagQuery,
+                            setTag = actions.setNotesTagFilter,
+                            setQuery = actions.setNotesTagQuery,
+                        )
+                        if (filteredNotes.isEmpty()) {
+                            ErrorState("No notes match this tag.", { actions.setNotesTagFilter(null) })
+                        } else {
+                            NotesList(filteredNotes, actions.openNote)
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NotesTagFilters(
+    tags: List<String>,
+    selectedTag: String?,
+    query: String,
+    setTag: (String?) -> Unit,
+    setQuery: (String) -> Unit,
+) {
+    if (tags.isEmpty()) return
+    val normalizedQuery = query.trim()
+    val visibleTags = tags
+        .filter { normalizedQuery.isEmpty() || it.contains(normalizedQuery, ignoreCase = true) }
+        .take(8)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 24.dp, end = 24.dp, bottom = 10.dp),
+    ) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = setQuery,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+            trailingIcon = {
+                if (selectedTag != null || query.isNotBlank()) {
+                    TextButton(onClick = {
+                        setTag(null)
+                        setQuery("")
+                    }) { Text("Clear") }
+                }
+            },
+            label = { Text("Search tags") },
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            TagChip("All", selectedTag == null) {
+                setTag(null)
+                setQuery("")
+            }
+            visibleTags.take(3).forEach { tag ->
+                TagChip("#$tag", selectedTag == tag) { setTag(tag) }
+            }
+        }
+        if (visibleTags.size > 3) {
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                visibleTags.drop(3).take(4).forEach { tag ->
+                    TagChip("#$tag", selectedTag == tag) { setTag(tag) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TagChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelLarge,
+        )
     }
 }
 
@@ -409,28 +511,71 @@ private fun NoteDetail(note: SmartNote, onBack: () -> Unit, onDelete: () -> Unit
             }
             HorizontalDivider(Modifier.padding(vertical = 24.dp))
             MarkdownText(note.body, Modifier.fillMaxWidth())
-            Spacer(Modifier.height(40.dp))
+            Spacer(Modifier.height(132.dp))
+        }
+    }
+}
+
+@Composable
+private fun NoteConversationFloatingControl(state: AppUiState, actions: AppActions, modifier: Modifier = Modifier) {
+    if (!state.isRecording && !state.isProcessing) {
+        Surface(
+            onClick = actions.startNoteConversation,
+            enabled = state.isPaired,
+            color = if (state.isPaired) FluidOrange else MaterialTheme.colorScheme.surfaceVariant,
+            shape = CircleShape,
+            shadowElevation = if (state.isPaired) 8.dp else 0.dp,
+            modifier = modifier.size(58.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Mic, contentDescription = "Continue note by voice", tint = Color.White, modifier = Modifier.size(28.dp))
+            }
+        }
+    } else {
+        Surface(
+            color = Color.Black,
+            shape = RoundedCornerShape(16.dp),
+            shadowElevation = 8.dp,
+            modifier = modifier,
+        ) {
+            Row(
+                modifier = Modifier.padding(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (state.isProcessing) {
+                    Box(Modifier.width(116.dp).height(48.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(26.dp), strokeWidth = 3.dp)
+                    }
+                } else {
+                    VoiceWaveform(state.audioLevel, Modifier.width(116.dp).height(48.dp).padding(horizontal = 8.dp))
+                    CaptureAction(Icons.Rounded.Close, "Discard", Color(0xFF9D3740), actions.rejectNoteConversation)
+                    CaptureAction(Icons.Rounded.Check, "Finish", FluidGreen, actions.confirmNoteConversation)
+                }
+            }
         }
     }
 }
 
 @Composable
 private fun CaptureScreen(state: AppUiState, actions: AppActions) {
+    val selectedPrompt = state.prompts.firstOrNull { it.id == state.selectedPromptId }
+        ?: RemotePrompt.fallbackPrompts.first()
     Column(Modifier.fillMaxSize()) {
         ScreenHeader(eyebrow = connectionLabel(state), title = "Capture")
         Column(
             modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            CaptureModePicker(state.captureMode, state.isRecording || state.isProcessing, actions.setCaptureMode)
+            PromptPicker(state.prompts, state.selectedPromptId, state.isRecording || state.isProcessing, actions.selectPrompt)
             Spacer(Modifier.weight(0.8f))
             Text(
-                if (state.captureMode == CaptureMode.Dictation) "Speak to type" else "Speak to remember",
+                if (selectedPrompt.kind == RemotePromptKind.Dictation) "Speak to type" else "Speak to remember",
                 style = MaterialTheme.typography.headlineMedium,
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                if (state.isRecording) "Listening on this phone" else if (state.isProcessing) "Working on your Mac" else modeDescription(state.captureMode),
+                if (state.isRecording) "Listening on this phone" else if (state.isProcessing) "Working on your Mac" else promptDescription(selectedPrompt),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -456,30 +601,39 @@ private fun CaptureScreen(state: AppUiState, actions: AppActions) {
 }
 
 @Composable
-private fun CaptureModePicker(mode: CaptureMode, disabled: Boolean, setMode: (CaptureMode) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(4.dp),
-    ) {
-        CaptureMode.entries.forEach { item ->
-            val selected = mode == item
+private fun PromptPicker(prompts: List<RemotePrompt>, selectedPromptId: String, disabled: Boolean, selectPrompt: (String) -> Unit) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        listOf(
+            "DICTATION" to prompts.filter { it.kind == RemotePromptKind.Dictation },
+            "SMART NOTES" to prompts.filter { it.kind == RemotePromptKind.SmartNote },
+        ).forEach { (label, group) ->
+            if (group.isEmpty()) return@forEach
+            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                group.forEach { prompt ->
+                    val selected = selectedPromptId == prompt.id
             Surface(
-                color = if (selected) MaterialTheme.colorScheme.surface else Color.Transparent,
-                shape = RoundedCornerShape(12.dp),
-                shadowElevation = if (selected) 1.dp else 0.dp,
-                modifier = Modifier.weight(1f).clickable(enabled = !disabled) { setMode(item) },
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.clickable(enabled = !disabled) { selectPrompt(prompt.id) },
             ) {
                 Row(
-                    modifier = Modifier.padding(vertical = 13.dp),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
-                        if (item == CaptureMode.Dictation) Icons.Rounded.GraphicEq else Icons.Rounded.EditNote,
+                                painterResource(promptIconResource(prompt)),
                         contentDescription = null,
                         tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.width(8.dp))
-                    Text(if (item == CaptureMode.Dictation) "Dictation" else "Smart Note", fontWeight = FontWeight.SemiBold)
+                            Text(prompt.title, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        }
+                    }
                 }
             }
         }
@@ -568,25 +722,6 @@ private fun SettingsScreen(state: AppUiState, actions: AppActions) {
             }
         }
         item {
-            SettingsSection("CAPTURE") {
-                SettingsSwitchRow(
-                    icon = Icons.Rounded.GraphicEq,
-                    title = "Polish dictation with AI",
-                    detail = "Cleans up text before insertion.",
-                    checked = state.dictationEnhancement,
-                    onChecked = actions.setDictationEnhancement,
-                )
-                HorizontalDivider(Modifier.padding(start = 52.dp))
-                SettingsSwitchRow(
-                    icon = Icons.Rounded.AutoAwesome,
-                    title = "Organize Smart Notes",
-                    detail = "Adds a title, category and tags after saving.",
-                    checked = state.notesEnhancement,
-                    onChecked = actions.setNotesEnhancement,
-                )
-            }
-        }
-        item {
             SettingsSection("OVERLAY") {
                 SettingsActionRow(
                     icon = Icons.Rounded.Tune,
@@ -600,6 +735,16 @@ private fun SettingsScreen(state: AppUiState, actions: AppActions) {
                     onAction = actions.toggleOverlay,
                 )
                 HorizontalDivider(Modifier.padding(start = 52.dp))
+                state.prompts.forEach { prompt ->
+                    SettingsSwitchRow(
+                        iconResource = promptIconResource(prompt),
+                        title = prompt.title,
+                        detail = if (prompt.kind == RemotePromptKind.Dictation) "Dictation prompt" else "Smart Note prompt",
+                        checked = !state.hiddenOverlayPromptIds.contains(prompt.id),
+                        onChecked = { visible -> actions.setOverlayPromptVisible(prompt.id, visible) },
+                    )
+                    HorizontalDivider(Modifier.padding(start = 52.dp))
+                }
                 SettingsActionRow(
                     icon = Icons.Rounded.EditNote,
                     title = if (state.accessibilityEnabled) "Text insertion enabled" else "Enable text insertion",
@@ -625,14 +770,19 @@ private fun SettingsSection(label: String, content: @Composable ColumnScope.() -
 
 @Composable
 private fun SettingsSwitchRow(
-    icon: ImageVector,
+    iconResource: Int,
     title: String,
     detail: String,
     checked: Boolean,
     onChecked: (Boolean) -> Unit,
 ) {
     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+        Icon(
+            painterResource(iconResource),
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(26.dp),
+        )
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
@@ -667,10 +817,27 @@ private fun SettingsActionRow(
 
 private fun connectionLabel(state: AppUiState): String = if (state.isPaired) "Mac connected" else "Not paired"
 
-private fun modeDescription(mode: CaptureMode): String = when (mode) {
-    CaptureMode.Dictation -> "Returns polished text to this app."
-    CaptureMode.SmartNote -> "Saves a note on your Mac and adds it to Notes."
+private fun promptDescription(prompt: RemotePrompt): String = when {
+    prompt.kind == RemotePromptKind.Dictation && prompt.isWithoutAI -> "Transcribes without an AI prompt."
+    prompt.kind == RemotePromptKind.Dictation -> "Uses ${prompt.title} and returns text to this app."
+    prompt.isWithoutAI -> "Saves the transcription as a note without AI."
+    else -> "Creates a ${prompt.title} note on your Mac."
 }
+
+private fun promptIconResource(prompt: RemotePrompt): Int = when (prompt.icon) {
+    "waveform" -> R.drawable.ic_dictation
+    "waveform-sparkles" -> R.drawable.ic_dictation_sparkles
+    "document" -> R.drawable.ic_note
+    "document-sparkles" -> R.drawable.ic_note_sparkles
+    "list" -> R.drawable.ic_list
+    else -> if (prompt.kind == RemotePromptKind.Dictation) R.drawable.ic_dictation_sparkles else R.drawable.ic_note_sparkles
+}
+
+private fun List<SmartNote>.filteredByTag(tag: String?): List<SmartNote> =
+    tag?.let { filter { note -> note.tags.contains(it) } } ?: this
+
+private fun List<SmartNote>.allTags(): List<String> =
+    flatMap { it.tags }.distinct().sorted()
 
 private fun formatDate(note: SmartNote): String = DateTimeFormatter
     .ofPattern("d MMM, HH:mm", Locale.getDefault())

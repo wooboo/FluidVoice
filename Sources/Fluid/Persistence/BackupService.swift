@@ -95,6 +95,7 @@ struct SettingsBackupPayload: Codable, Equatable {
     let selectedEditPromptID: String?
     let editPromptRoutingScope: SettingsStore.PromptRoutingScope?
     let defaultDictationPromptOverride: String?
+    let defaultSmartNotePromptOverride: String?
     let defaultEditPromptOverride: String?
 }
 

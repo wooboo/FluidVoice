@@ -57,6 +57,50 @@ final class SmartNotesStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.notes.first?.body, body)
     }
 
+    func testPromptIDPersistsAndRawContinuationAppendsWithoutAI() throws {
+        let store = SmartNotesStore(directoryURL: self.temporaryDirectory)
+        let captured = try store.capture(rawText: "Milk", promptID: SmartNoteCaptureService.noAIPromptID)
+
+        let updated = try store.append(rawText: "Bread", to: captured.id)
+        let reloaded = SmartNotesStore(directoryURL: self.temporaryDirectory)
+
+        XCTAssertEqual(updated.body, "Milk\n\nBread")
+        XCTAssertEqual(reloaded.notes.first?.promptID, SmartNoteCaptureService.noAIPromptID)
+        XCTAssertFalse(reloaded.notes.first?.isAIEnhanced ?? true)
+    }
+
+    func testEverySmartNotePromptEndsWithJSONContract() {
+        let combined = SettingsStore.combineBasePrompt(for: .smartNote, with: "Create a project note.")
+
+        XCTAssertTrue(combined.hasSuffix(SettingsStore.smartNoteOutputContractText()))
+        XCTAssertTrue(combined.contains("Return only one valid JSON object"))
+    }
+
+    func testShoppingListUsesPlainListsAndMovesPurchasedItems() {
+        let prompt = SettingsStore.defaultShoppingListPromptBodyText()
+
+        XCTAssertTrue(prompt.contains("## To buy"))
+        XCTAssertTrue(prompt.contains("## Purchased"))
+        XCTAssertTrue(prompt.contains("move it to \"## Purchased\""))
+        XCTAssertTrue(prompt.contains("Never use checkboxes"))
+    }
+
+    func testPromptIconPersistsWithProfile() throws {
+        let profile = SettingsStore.DictationPromptProfile(
+            name: "Project note",
+            prompt: "Create a project note.",
+            mode: .smartNote,
+            icon: .documentSparkles
+        )
+
+        let decoded = try JSONDecoder().decode(
+            SettingsStore.DictationPromptProfile.self,
+            from: JSONEncoder().encode(profile)
+        )
+
+        XCTAssertEqual(decoded.icon, .documentSparkles)
+    }
+
     func testAIResponseParserExtractsJSONAndNormalizesTags() throws {
         let response = """
         ```json

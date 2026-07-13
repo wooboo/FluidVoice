@@ -43,6 +43,8 @@ extension SettingsStore {
         switch mode.normalized {
         case .dictate:
             return self.dictationPromptRoutingScope
+        case .smartNote:
+            return .allApps
         case .edit, .write, .rewrite:
             return self.editPromptRoutingScope
         }
@@ -52,6 +54,8 @@ extension SettingsStore {
         switch mode.normalized {
         case .dictate:
             self.dictationPromptRoutingScope = scope
+        case .smartNote:
+            break
         case .edit, .write, .rewrite:
             self.editPromptRoutingScope = scope
         }

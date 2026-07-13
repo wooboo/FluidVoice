@@ -18,7 +18,9 @@ final class RemoteAPIServer: ObservableObject {
         pairing: self.pairing,
         dictate: Self.dictate,
         captureNote: Self.captureNote,
+        continueNote: Self.continueNote,
         listNotes: { SmartNoteCaptureService.shared.notes() },
+        listPrompts: Self.listPrompts,
         deleteNote: { try SmartNoteCaptureService.shared.delete(id: $0) }
     )
     private var listener: NWListener?
@@ -217,15 +219,19 @@ final class RemoteAPIServer: ObservableObject {
             input.requestID,
             "asr_done elapsedMs=\(Self.milliseconds(from: decodedAt, to: transcribedAt)) chars=\(raw.count)"
         )
-        guard input.wantsEnhancement, DictationAIPostProcessingGate.isConfigured(for: .primary) else {
+        guard input.wantsEnhancement else {
             Self.log(input.requestID, "pipeline_done enhancement=skipped totalMs=\(Self.milliseconds(from: startedAt))")
             return RemoteAPI.DictateResponse(rawText: raw, finalText: raw)
         }
         do {
             Self.log(input.requestID, "enhancement_start")
+            let promptOverride = Self.dictationPromptOverride(for: input.dictationPromptID)
+            let providerConfiguration = SettingsStore.shared.remoteAIConfiguration(promptID: input.dictationPromptID)
             let enhanced = try await DictationPostProcessingService.shared.process(
                 raw,
-                inputContext: input.inputContext
+                promptOverride: promptOverride,
+                inputContext: input.inputContext,
+                providerConfiguration: providerConfiguration
             ).text
             Self.log(
                 input.requestID,
@@ -245,6 +251,42 @@ final class RemoteAPIServer: ObservableObject {
         }
     }
 
+    private static func listPrompts() -> [RemoteAPI.PromptResponse] {
+        SettingsStore.shared.reconcilePromptStateAfterProfileChanges()
+        let noAI = RemoteAPI.PromptResponse(
+            id: "__dictation_no_ai__",
+            title: "Dictation (no AI)",
+            kind: .dictation,
+            icon: SettingsStore.PromptIcon.waveform.rawValue,
+            isBuiltIn: true
+        )
+        let builtInDictation = RemoteAPI.PromptResponse(
+            id: "__dictation_default__",
+            title: "Default Dictation",
+            kind: .dictation,
+            icon: SettingsStore.PromptIcon.waveformSparkles.rawValue,
+            isBuiltIn: true
+        )
+        let dictation = SettingsStore.shared.promptProfiles(for: .dictate).map {
+            RemoteAPI.PromptResponse(
+                id: $0.id,
+                title: $0.name.isEmpty ? "Untitled Prompt" : $0.name,
+                kind: .dictation,
+                icon: $0.icon.rawValue,
+                isBuiltIn: false
+            )
+        }
+        return [noAI, builtInDictation] + dictation + SmartNoteCaptureService.smartNotePromptResponses()
+    }
+
+    private static func dictationPromptOverride(for id: String?) -> String? {
+        guard let id, id != "__dictation_default__" else { return nil }
+        guard let profile = SettingsStore.shared.promptProfiles(for: .dictate).first(where: { $0.id == id }) else {
+            return nil
+        }
+        return SettingsStore.combineBasePrompt(for: .dictate, with: profile.prompt)
+    }
+
     private static func captureNote(input: RemoteAPI.DictateInput) async throws -> RemoteAPI.SmartNoteCaptureResponse {
         let startedAt = ProcessInfo.processInfo.systemUptime
         Self.log(input.requestID, "note_pipeline_start bytes=\(input.audio.count) format=\(input.audioFileExtension)")
@@ -259,12 +301,34 @@ final class RemoteAPIServer: ObservableObject {
         )
         let response = try await SmartNoteCaptureService.shared.capture(
             rawText: transcription.text,
-            enhance: input.wantsEnhancement
+            enhance: input.wantsEnhancement,
+            promptID: input.notePromptID
         )
         Self.log(
             input.requestID,
             "note_pipeline_done enhanced=\(response.note.isAIEnhanced) totalMs=\(Self.milliseconds(from: startedAt))"
         )
+        return response
+    }
+
+    private static func continueNote(noteID: UUID, input: RemoteAPI.DictateInput) async throws -> RemoteAPI.SmartNoteCaptureResponse {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        Self.log(input.requestID, "note_continue_pipeline_start note=\(noteID.uuidString.lowercased()) bytes=\(input.audio.count)")
+        let samples = try LocalAPIAudioDecoder.samples(
+            fromAudioData: input.audio,
+            suggestedExtension: input.audioFileExtension
+        )
+        let transcription = try await AppServices.shared.asr.transcribeSamplesForAPI(samples)
+        Self.log(
+            input.requestID,
+            "note_continue_asr_done elapsedMs=\(Self.milliseconds(from: startedAt)) chars=\(transcription.text.count)"
+        )
+        let response = try await SmartNoteCaptureService.shared.continueNote(
+            id: noteID,
+            rawText: transcription.text,
+            promptID: input.notePromptID
+        )
+        Self.log(input.requestID, "note_continue_done totalMs=\(Self.milliseconds(from: startedAt))")
         return response
     }
 

@@ -24,7 +24,8 @@ final class DictationPostProcessingService {
         _ inputText: String,
         dictationSlot: SettingsStore.DictationShortcutSlot = .primary,
         promptOverride: String? = nil,
-        inputContext: RemoteAPI.InputFieldContext? = nil
+        inputContext: RemoteAPI.InputFieldContext? = nil,
+        providerConfiguration: SettingsStore.DictationPromptConfiguration? = nil
     ) async throws -> Result {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -35,7 +36,8 @@ final class DictationPostProcessingService {
         let resolved = self.resolveProvider(
             settings: settings,
             dictationSlot: dictationSlot,
-            ignoresPrivateAISelection: promptOverride != nil
+            ignoresPrivateAISelection: promptOverride != nil,
+            providerConfiguration: providerConfiguration
         )
         guard !resolved.providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AIProcessingError.noVerifiedProvider
@@ -176,8 +178,21 @@ final class DictationPostProcessingService {
     private func resolveProvider(
         settings: SettingsStore,
         dictationSlot: SettingsStore.DictationShortcutSlot,
-        ignoresPrivateAISelection: Bool
+        ignoresPrivateAISelection: Bool,
+        providerConfiguration: SettingsStore.DictationPromptConfiguration?
     ) -> ResolvedProvider {
+        if let configuration = providerConfiguration {
+            let providerID = configuration.providerID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let configuredModel = configuration.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !providerID.isEmpty {
+                return self.resolveProvider(
+                    providerID: providerID,
+                    configuredModel: configuredModel,
+                    settings: settings
+                )
+            }
+        }
+
         if !ignoresPrivateAISelection,
            settings.dictationPromptSelection(for: dictationSlot) == .privateAI,
            let modelID = PrivateAIProviderPromptFormat.verifiedModelID(settings: settings)
@@ -192,7 +207,18 @@ final class DictationPostProcessingService {
             )
         }
 
-        let providerID = settings.selectedProviderID
+        return self.resolveProvider(
+            providerID: settings.selectedProviderID,
+            configuredModel: "",
+            settings: settings
+        )
+    }
+
+    private func resolveProvider(
+        providerID: String,
+        configuredModel: String,
+        settings: SettingsStore
+    ) -> ResolvedProvider {
         let selectedModels = settings.selectedModelByProvider
         let providerKeys = settings.providerAPIKeys
 
@@ -202,7 +228,7 @@ final class DictationPostProcessingService {
                 providerID: providerID,
                 providerKey: key,
                 baseURL: saved.baseURL,
-                model: selectedModels[key] ?? saved.models.first ?? "",
+                model: configuredModel.nonEmpty ?? selectedModels[key] ?? saved.models.first ?? "",
                 apiKey: providerKeys[key] ?? providerKeys[providerID] ?? ""
             )
         }
@@ -212,7 +238,7 @@ final class DictationPostProcessingService {
                 providerID: providerID,
                 providerKey: providerID,
                 baseURL: ModelRepository.shared.defaultBaseURL(for: providerID),
-                model: selectedModels[providerID] ?? ModelRepository.shared.defaultModels(for: providerID).first ?? "",
+                model: configuredModel.nonEmpty ?? selectedModels[providerID] ?? ModelRepository.shared.defaultModels(for: providerID).first ?? "",
                 apiKey: providerKeys[providerID] ?? ""
             )
         }
@@ -221,7 +247,7 @@ final class DictationPostProcessingService {
             providerID: providerID,
             providerKey: providerID,
             baseURL: "",
-            model: selectedModels[providerID] ?? "",
+            model: configuredModel.nonEmpty ?? selectedModels[providerID] ?? "",
             apiKey: providerKeys[providerID] ?? ""
         )
     }

@@ -9,6 +9,7 @@ struct SmartNote: Identifiable, Equatable {
     var tags: [String]
     var body: String
     var isAIEnhanced: Bool
+    var promptID: String? = nil
     let fileURL: URL
 }
 
@@ -117,6 +118,7 @@ final class SmartNotesStore: ObservableObject {
     static let shared = SmartNotesStore()
 
     @Published private(set) var notes: [SmartNote] = []
+    @Published var selectedNoteID: UUID?
 
     let notesDirectoryURL: URL
     private let fileManager: FileManager
@@ -130,7 +132,7 @@ final class SmartNotesStore: ObservableObject {
     }
 
     @discardableResult
-    func capture(rawText: String, at date: Date = Date(), id: UUID = UUID()) throws -> SmartNote {
+    func capture(rawText: String, promptID: String? = nil, at date: Date = Date(), id: UUID = UUID()) throws -> SmartNote {
         let body = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { throw SmartNotesError.emptyTranscript }
 
@@ -143,6 +145,7 @@ final class SmartNotesStore: ObservableObject {
             tags: [],
             body: body,
             isAIEnhanced: false,
+            promptID: promptID,
             fileURL: self.notesDirectoryURL.appendingPathComponent(Self.fileName(for: date, id: id))
         )
         try self.write(note)
@@ -161,6 +164,19 @@ final class SmartNotesStore: ObservableObject {
         note.tags = enhancement.tags
         note.body = enhancement.body
         note.isAIEnhanced = true
+        try self.write(note)
+        self.reload()
+        return note
+    }
+
+    @discardableResult
+    func append(rawText: String, to noteID: UUID) throws -> SmartNote {
+        guard var note = self.notes.first(where: { $0.id == noteID }) else {
+            throw SmartNotesError.noteNotFound
+        }
+        let addition = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !addition.isEmpty else { throw SmartNotesError.emptyTranscript }
+        note.body = [note.body, addition].filter { !$0.isEmpty }.joined(separator: "\n\n")
         try self.write(note)
         self.reload()
         return note
@@ -243,6 +259,7 @@ final class SmartNotesStore: ObservableObject {
             tags: Self.decodeTags(metadata["tags"]),
             body: body.trimmingCharacters(in: .whitespacesAndNewlines),
             isAIEnhanced: metadata["enhanced"] == "true",
+            promptID: metadata["promptID"].flatMap { $0.isEmpty ? nil : $0 },
             fileURL: self.notesDirectoryURL.appendingPathComponent(url.lastPathComponent)
         )
     }
@@ -253,6 +270,7 @@ final class SmartNotesStore: ObservableObject {
         let title = try self.json(note.title)
         let category = try self.json(note.category ?? "")
         let tags = try self.json(note.tags)
+        let promptID = try self.json(note.promptID ?? "")
         return """
         ---
         id: \(id)
@@ -260,6 +278,7 @@ final class SmartNotesStore: ObservableObject {
         title: \(title)
         category: \(category)
         tags: \(tags)
+        promptID: \(promptID)
         enhanced: \(note.isAIEnhanced)
         ---
         <!-- fluidvoice:body -->

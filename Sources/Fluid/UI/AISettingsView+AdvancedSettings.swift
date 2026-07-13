@@ -28,11 +28,56 @@ extension AIEnhancementSettingsView {
     // MARK: - Advanced Settings Card
 
     var advancedSettingsCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            self.promptModeViewport(mode: .dictate)
+        VStack(alignment: .leading, spacing: 22) {
+            self.promptCollectionSection(
+                title: "Dictation prompts",
+                description: "Each prompt becomes a Dictate action on the overlay. A no-AI action is always available.",
+                symbol: "quote.bubble.fill",
+                mode: .dictate
+            )
+
+            Divider()
+
+            self.promptCollectionSection(
+                title: "Smart Notes prompts",
+                description: "Each prompt becomes a separate note type on the overlay.",
+                symbol: "note.text",
+                mode: .smartNote
+            )
         }
         .sheet(item: self.$viewModel.promptEditorMode) { mode in
             self.promptEditorSheet(mode: mode)
+        }
+    }
+
+    private func promptCollectionSection(
+        title: String,
+        description: String,
+        symbol: String,
+        mode: SettingsStore.PromptMode
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.fluidGreen)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.fluidGreen.opacity(0.12))
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(self.theme.palette.primaryText)
+                    Text(description)
+                        .font(.caption)
+                        .foregroundStyle(self.theme.palette.secondaryText)
+                }
+            }
+
+            self.promptModeSection(mode: mode)
         }
     }
 
@@ -104,6 +149,7 @@ extension AIEnhancementSettingsView {
         title: String,
         subtitle: String,
         mode: SettingsStore.PromptMode,
+        overlayIcon: SettingsStore.PromptIcon? = nil,
         isSelected: Bool,
         assignments: PromptCardAssignments? = nil,
         notice: String? = nil,
@@ -122,6 +168,7 @@ extension AIEnhancementSettingsView {
                 self.promptCardIcon(
                     title: title,
                     mode: mode,
+                    overlayIcon: overlayIcon,
                     isSelected: isSelectedRow,
                     tone: tone
                 )
@@ -208,6 +255,7 @@ extension AIEnhancementSettingsView {
     private func promptCardIcon(
         title: String,
         mode: SettingsStore.PromptMode,
+        overlayIcon: SettingsStore.PromptIcon?,
         isSelected: Bool,
         tone: Color
     ) -> some View {
@@ -228,12 +276,48 @@ extension AIEnhancementSettingsView {
                         .stroke(isSelected ? Color.fluidGreen.opacity(0.5) : self.theme.palette.cardBorder.opacity(0.5), lineWidth: 1)
                 )
 
-            Image(systemName: symbol)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.fluidGreen : self.theme.palette.secondaryText)
+            if let overlayIcon {
+                self.promptIconGlyph(overlayIcon, size: 15)
+                    .foregroundStyle(isSelected ? Color.fluidGreen : self.theme.palette.secondaryText)
+            } else {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.fluidGreen : self.theme.palette.secondaryText)
+            }
         }
         .frame(width: 34, height: 34)
         .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func promptIconGlyph(_ icon: SettingsStore.PromptIcon, size: CGFloat) -> some View {
+        switch icon {
+        case .waveform:
+            Image(systemName: "waveform")
+                .font(.system(size: size, weight: .semibold))
+        case .waveformSparkles:
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "waveform")
+                    .font(.system(size: size, weight: .semibold))
+                Image(systemName: "sparkle")
+                    .font(.system(size: size * 0.48, weight: .bold))
+                    .offset(x: size * 0.34, y: -size * 0.28)
+            }
+        case .document:
+            Image(systemName: "doc.text.fill")
+                .font(.system(size: size, weight: .semibold))
+        case .documentSparkles:
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "doc.text.fill")
+                    .font(.system(size: size, weight: .semibold))
+                Image(systemName: "sparkle")
+                    .font(.system(size: size * 0.48, weight: .bold))
+                    .offset(x: size * 0.34, y: -size * 0.28)
+            }
+        case .list:
+            Image(systemName: "list.bullet")
+                .font(.system(size: size, weight: .semibold))
+        }
     }
 
     private func promptCardTitleBlock(
@@ -428,13 +512,24 @@ extension AIEnhancementSettingsView {
         )
     }
 
+    private func smartNotePromptAssignments(promptID: String) -> PromptCardAssignments {
+        let selection = SettingsStore.DictationPromptSelection.profile(promptID)
+        let configuration = self.settings.dictationPromptConfiguration(for: selection)
+        return PromptCardAssignments(
+            isDefault: false,
+            shortcutDisplay: configuration.shortcut?.displayString,
+            modelPicker: self.promptModelPicker(selection: selection, isPrivateAI: false),
+            onMakeDefault: {}
+        )
+    }
+
     private func promptEditorSelection(for mode: PromptEditorMode) -> SettingsStore.DictationPromptSelection? {
         switch mode {
         case let .defaultPrompt(promptMode):
-            guard promptMode.normalized == .dictate else { return nil }
-            return .default
+            return promptMode.normalized == .dictate
+                ? .default
+                : .profile(SmartNoteCaptureService.defaultPromptID)
         case let .edit(promptID):
-            guard self.viewModel.draftPromptMode.normalized == .dictate else { return nil }
             return .profile(promptID)
         case .newPrompt:
             return nil
@@ -592,7 +687,8 @@ extension AIEnhancementSettingsView {
 
     private func shouldShowPromptEditorConfigurationPanel(for mode: PromptEditorMode) -> Bool {
         if case .newPrompt = mode {
-            return self.viewModel.draftPromptMode.normalized == .dictate
+            return self.viewModel.draftPromptMode.normalized == .dictate ||
+                self.viewModel.draftPromptMode.normalized == .smartNote
         }
         if case .privateAI = mode {
             return true
@@ -931,6 +1027,8 @@ extension AIEnhancementSettingsView {
         switch mode.normalized {
         case .dictate:
             return 116
+        case .smartNote:
+            return 150
         case .edit, .write, .rewrite:
             return 124
         }
@@ -960,31 +1058,50 @@ extension AIEnhancementSettingsView {
 
                     self.privateAIOnlyNotice
                 } else {
-                    self.promptRoutingScopeRow(mode: mode)
+                    if mode.normalized != .smartNote {
+                        self.promptRoutingScopeRow(mode: mode)
 
-                    Text(
-                        isSelectedAppsOnly
-                            ? "Custom prompts only run in apps listed in App Overrides."
-                            : "Custom prompts run based on your shortcut or the app you're in."
-                    )
-                    .font(.caption2)
-                    .foregroundStyle(self.theme.palette.secondaryText)
-                    .padding(.horizontal, 4)
-                    .padding(.bottom, 2)
+                        Text(
+                            isSelectedAppsOnly
+                                ? "Custom prompts only run in apps listed in App Overrides."
+                                : "Custom prompts run based on your shortcut or the app you're in."
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(self.theme.palette.secondaryText)
+                        .padding(.horizontal, 4)
+                        .padding(.bottom, 2)
+                    } else {
+                        HStack {
+                            Text("Smart Notes prompts create structured notes and appear as note buttons on the Android overlay.")
+                                .font(.caption2)
+                                .foregroundStyle(self.theme.palette.secondaryText)
+                            Spacer()
+                            Button {
+                                self.viewModel.openNewPromptEditor(prefillMode: .smartNote)
+                            } label: {
+                                Label("Add Prompt", systemImage: "plus")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .frame(minWidth: AISettingsLayout.actionMinWidth, minHeight: AISettingsLayout.controlHeight)
+                            }
+                            .fluidCompactButton(isReady: true, foreground: Color.fluidGreen, borderColor: Color.fluidGreen.opacity(0.5))
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.bottom, 2)
+                    }
 
                     Group {
                         let defaultSelection = SettingsStore.DictationPromptSelection.default
                         self.promptProfileCard(
                             cardKey: "\(mode.normalized.rawValue)-default",
-                            title: mode.normalized == .dictate ? "Built-in Default" : "Default \(self.friendlyModeName(mode))",
+                            title: mode.normalized == .dictate ? "Default Dictation" : "General Note",
                             subtitle: "",
                             mode: mode,
+                            overlayIcon: mode.normalized == .dictate ? .waveformSparkles : .documentSparkles,
                             isSelected: mode.normalized == .dictate
-                                ? (self.viewModel.selectedPromptID(for: mode) == nil)
-                                : (self.viewModel.selectedPromptID(for: mode) == nil),
+                                && self.viewModel.selectedPromptID(for: mode) == nil,
                             assignments: mode.normalized == .dictate
                                 ? self.promptAssignments(selection: defaultSelection)
-                                : nil,
+                                : self.smartNotePromptAssignments(promptID: SmartNoteCaptureService.defaultPromptID),
                             onManage: { self.viewModel.openDefaultPromptViewer(for: mode) },
                             isEnabled: !isSelectedAppsOnly
                         )
@@ -997,10 +1114,12 @@ extension AIEnhancementSettingsView {
                                     title: profile.name.isEmpty ? "Untitled Prompt" : profile.name,
                                     subtitle: "",
                                     mode: profile.mode,
-                                    isSelected: self.viewModel.selectedPromptID(for: profile.mode) == profile.id,
+                                    overlayIcon: profile.icon,
+                                    isSelected: profile.mode.normalized == .dictate
+                                        && self.viewModel.selectedPromptID(for: profile.mode) == profile.id,
                                     assignments: profile.mode.normalized == .dictate
                                         ? self.promptAssignments(selection: profileSelection)
-                                        : nil,
+                                        : self.smartNotePromptAssignments(promptID: profile.id),
                                     onManage: { self.viewModel.openEditor(for: profile) },
                                     onDelete: { self.viewModel.requestDeletePrompt(profile) },
                                     isEnabled: !isSelectedAppsOnly
@@ -1010,7 +1129,9 @@ extension AIEnhancementSettingsView {
                     }
                     .opacity(isSelectedAppsOnly ? 0.5 : 1)
 
-                    self.appPromptBindingsSection(mode: mode, isEmphasized: isSelectedAppsOnly, isEnabled: true)
+                    if mode.normalized != .smartNote {
+                        self.appPromptBindingsSection(mode: mode, isEmphasized: isSelectedAppsOnly, isEnabled: true)
+                    }
                 }
             }
         }
@@ -1044,6 +1165,11 @@ extension AIEnhancementSettingsView {
         HStack {
             if mode.normalized == .dictate {
                 Text("Default uses the main dictation shortcut. Add a custom shortcut only when a prompt needs one.")
+                    .font(.caption2)
+                    .foregroundStyle(self.theme.palette.secondaryText)
+                    .lineLimit(1)
+            } else if mode.normalized == .smartNote {
+                Text("Each Smart Notes prompt becomes a note capture action.")
                     .font(.caption2)
                     .foregroundStyle(self.theme.palette.secondaryText)
                     .lineLimit(1)
@@ -1084,7 +1210,7 @@ extension AIEnhancementSettingsView {
                 self.editModeInlineModelControls
             } else if !self.viewModel.isPrivateAIModelSelected() {
                 Button {
-                    self.viewModel.openNewPromptEditor(prefillMode: .dictate)
+                    self.viewModel.openNewPromptEditor(prefillMode: mode.normalized)
                 } label: {
                     Label("Add Prompt", systemImage: "plus")
                         .font(.system(size: 12, weight: .semibold))
@@ -1588,7 +1714,9 @@ extension AIEnhancementSettingsView {
     private func promptSectionDescription(for mode: SettingsStore.PromptMode) -> String {
         switch mode {
         case .dictate:
-            return "Each prompt can have its own provider, model, and optional shortcut."
+            return "Dictation prompts polish text before insertion. Each prompt can have its own provider, model, and optional shortcut."
+        case .smartNote:
+            return "Smart Notes prompts define note types. Each prompt returns a structured Markdown note."
         case .edit, .write, .rewrite:
             return "Uses selected text as context (when text is selected) - Edit or rewrite selected text - answer questions, summarize, convert to bullets etc."
         }
@@ -1610,6 +1738,8 @@ extension AIEnhancementSettingsView {
         switch mode.normalized {
         case .dictate:
             return "mic.fill"
+        case .smartNote:
+            return "note.text"
         case .edit, .write, .rewrite:
             return "square.and.pencil"
         }
@@ -1618,7 +1748,9 @@ extension AIEnhancementSettingsView {
     private func friendlyModeName(_ mode: SettingsStore.PromptMode) -> String {
         switch mode.normalized {
         case .dictate:
-            return "Dictate"
+            return "Dictation"
+        case .smartNote:
+            return "Smart Notes"
         case .edit, .write, .rewrite:
             return "Edit Text"
         }
@@ -1666,6 +1798,40 @@ extension AIEnhancementSettingsView {
                 }
             }
 
+            if !mode.isPrivateAI && !mode.isDefault {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Overlay icon")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        ForEach(SettingsStore.PromptIcon.allCases) { icon in
+                            let isSelected = self.viewModel.draftPromptIcon == icon
+                            Button {
+                                self.viewModel.draftPromptIcon = icon
+                            } label: {
+                                VStack(spacing: 5) {
+                                    self.promptIconGlyph(icon, size: 18)
+                                    Text(icon.displayName)
+                                        .font(.caption2)
+                                }
+                                .foregroundStyle(isSelected ? Color.fluidGreen : self.theme.palette.secondaryText)
+                                .frame(width: 92, height: 48)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(self.theme.palette.contentBackground)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .stroke(isSelected ? Color.fluidGreen : self.theme.palette.cardBorder, lineWidth: isSelected ? 2 : 1)
+                                        )
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+
             if !mode.isPrivateAI {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Prompt")
@@ -1694,7 +1860,7 @@ extension AIEnhancementSettingsView {
                 }
             }
 
-            if self.viewModel.draftPromptMode != .dictate {
+            if self.viewModel.draftPromptMode.normalized == .edit {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Selected text is added automatically when text is selected.")
                         .font(.caption)
@@ -1705,6 +1871,27 @@ extension AIEnhancementSettingsView {
                         .foregroundStyle(.secondary)
 
                     Text(SettingsStore.contextTemplateText())
+                        .font(.system(.caption2, design: .monospaced))
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(self.theme.palette.contentBackground)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(self.theme.palette.cardBorder, lineWidth: 1)
+                                )
+                        )
+                }
+            }
+
+            if self.viewModel.draftPromptMode.normalized == .smartNote {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("JSON output contract added automatically")
+                        .font(.caption)
+                        .foregroundStyle(self.theme.palette.secondaryText)
+
+                    Text(SettingsStore.smartNoteOutputContractText())
                         .font(.system(.caption2, design: .monospaced))
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)

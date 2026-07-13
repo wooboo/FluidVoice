@@ -11,6 +11,7 @@ data class SmartNote(
     val tags: List<String>,
     val body: String,
     val isAIEnhanced: Boolean,
+    val promptId: String?,
 ) {
     companion object {
         fun parseList(json: String): List<SmartNote> {
@@ -28,9 +29,13 @@ data class SmartNote(
             },
             body = json.getString("body"),
             isAIEnhanced = json.getBoolean("isAIEnhanced"),
+            promptId = if (json.isNull("promptID")) null else json.getString("promptID").takeIf { it.isNotBlank() },
         )
     }
 }
+
+fun SmartNote.promptId(): String = promptId
+    ?: if (tags.contains("shopping-list")) "shopping-list" else RemotePrompt.DEFAULT_SMART_NOTE_ID
 
 data class SmartNoteCapture(
     val note: SmartNote,

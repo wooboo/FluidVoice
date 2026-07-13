@@ -114,6 +114,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     @Published var draftPromptName: String = ""
     @Published var draftPromptText: String = ""
     @Published var draftPromptMode: SettingsStore.PromptMode = .dictate
+    @Published var draftPromptIcon: SettingsStore.PromptIcon = .waveformSparkles
     @Published var draftIncludeContext: Bool = false
     @Published var promptEditorSessionID: UUID = .init()
     @Published var pendingNewPromptConfiguration: SettingsStore.DictationPromptConfiguration?
@@ -1614,6 +1615,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
     func openDefaultPromptViewer(for mode: SettingsStore.PromptMode) {
         let normalizedMode = mode.normalized
         self.draftPromptMode = normalizedMode
+        self.draftPromptIcon = SettingsStore.PromptIcon.defaultIcon(for: normalizedMode)
         self.draftIncludeContext = (normalizedMode == .edit)
         self.draftPromptName = "Default \(normalizedMode.displayName)"
         if let override = self.settings.defaultPromptOverride(for: normalizedMode) {
@@ -1627,6 +1629,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
 
     func openNewPromptEditor(prefillMode: SettingsStore.PromptMode = .edit) {
         self.draftPromptMode = prefillMode.normalized
+        self.draftPromptIcon = SettingsStore.PromptIcon.defaultIcon(for: self.draftPromptMode)
         self.draftIncludeContext = (self.draftPromptMode == .edit)
         self.draftPromptName = ""
         self.draftPromptText = ""
@@ -1651,6 +1654,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
 
     func openEditor(for profile: SettingsStore.DictationPromptProfile) {
         self.draftPromptMode = profile.mode.normalized
+        self.draftPromptIcon = profile.icon
         self.draftIncludeContext = (self.draftPromptMode == .edit) ? true : profile.includeContext
         self.draftPromptName = profile.name
         self.draftPromptText = SettingsStore.stripBasePrompt(for: self.draftPromptMode, from: profile.prompt)
@@ -1663,6 +1667,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         self.draftPromptName = ""
         self.draftPromptText = ""
         self.draftPromptMode = .dictate
+        self.draftPromptIcon = .waveformSparkles
         self.draftIncludeContext = false
         self.pendingNewPromptConfiguration = nil
         self.promptTest.deactivate()
@@ -1700,6 +1705,7 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
             updated.name = name
             updated.prompt = promptBody
             updated.mode = self.draftPromptMode.normalized
+            updated.icon = self.draftPromptIcon
             updated.includeContext = includeContext
             updated.updatedAt = now
             profiles[idx] = updated
@@ -1714,15 +1720,14 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
                 name: name,
                 prompt: promptBody,
                 mode: self.draftPromptMode.normalized,
+                icon: self.draftPromptIcon,
                 includeContext: includeContext,
                 createdAt: now,
                 updatedAt: now
             )
             profiles.append(newProfile)
 
-            if let pendingConfig = self.pendingNewPromptConfiguration,
-               self.draftPromptMode.normalized == .dictate
-            {
+            if let pendingConfig = self.pendingNewPromptConfiguration {
                 self.settings.setDictationPromptConfiguration(pendingConfig, for: .profile(newProfile.id))
                 if pendingConfig.shortcut != nil {
                     NotificationCenter.default.post(name: .dictationPromptShortcutsChanged, object: nil)
@@ -2068,6 +2073,8 @@ final class AIEnhancementSettingsViewModel: ObservableObject {
         switch mode.normalized {
         case .dictate:
             return self.selectedDictationPromptID
+        case .smartNote:
+            return nil
         case .edit:
             return self.selectedEditPromptID
         case .write, .rewrite:
