@@ -1,5 +1,6 @@
 package com.fluidvoice.remote
 
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -9,9 +10,12 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -22,7 +26,9 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
@@ -33,7 +39,6 @@ import android.widget.Toast
 import android.util.Log
 import kotlin.concurrent.thread
 import kotlin.math.abs
-import kotlin.math.max
 
 class OverlayService : Service() {
     private lateinit var windowManager: WindowManager
@@ -47,7 +52,10 @@ class OverlayService : Service() {
     private lateinit var errorLabel: TextView
     private lateinit var confirmButton: ImageButton
     private lateinit var rejectButton: ImageButton
+    private lateinit var collapsedBackground: EdgeAttachmentDrawable
+    private lateinit var expandedBackground: EdgeAttachmentDrawable
     private lateinit var recorder: CompressedAudioRecorder
+    private val captureModeButtons = mutableListOf<View>()
     private val client = RemoteClient()
     private val handler = Handler(Looper.getMainLooper())
     private var state: OverlayState = OverlayState.Idle
@@ -58,6 +66,9 @@ class OverlayService : Service() {
     private var amplitudeMinimum = Int.MAX_VALUE
     private var amplitudeMaximum = 0
     private var inputFieldContext: InputFieldContext? = null
+    private var attachmentEdge = OverlayEdge.None
+    private var attachmentProgress = 0f
+    private var attachmentAnimator: ValueAnimator? = null
 
     private val amplitudeSampler = object : Runnable {
         override fun run() {
@@ -96,6 +107,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        attachmentAnimator?.cancel()
         if (::root.isInitialized) windowManager.removeView(root)
         if (state is OverlayState.Recording) runCatching { recorder.stop() }
         isRunning = false
@@ -104,6 +116,14 @@ class OverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!::root.isInitialized) return
+        root.post {
+            if (root.isAttachedToWindow) repositionAfterViewportChange()
+        }
+    }
+
     private fun showOverlay() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         root = FrameLayout(this)
@@ -111,6 +131,7 @@ class OverlayService : Service() {
         expandedPanel = buildExpandedPanel()
         root.addView(collapsedButton)
         root.addView(expandedPanel)
+        val viewport = currentViewportSize()
         layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -119,26 +140,40 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = resources.displayMetrics.widthPixels - dp(COLLAPSED_PANEL_WIDTH_DP + OVERLAY_EDGE_MARGIN_DP)
-            y = (resources.displayMetrics.heightPixels - dp(COLLAPSED_PANEL_HEIGHT_DP)) / 2
+            x = viewport.width - dp(COLLAPSED_PANEL_WIDTH_DP + OVERLAY_EDGE_MARGIN_DP)
+            y = dp(OVERLAY_EDGE_MARGIN_DP)
         }
         idleX = layoutParams.x
         idleY = layoutParams.y
         windowManager.addView(root, layoutParams)
         renderState()
+        root.post {
+            if (root.isAttachedToWindow) anchorPositionToTopRight()
+        }
     }
 
     private fun buildCollapsedButton(): LinearLayout = LinearLayout(this).apply {
         layoutParams = FrameLayout.LayoutParams(dp(COLLAPSED_PANEL_WIDTH_DP), dp(COLLAPSED_PANEL_HEIGHT_DP))
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
-        setPadding(dp(6), dp(6), dp(6), dp(6))
-        background = roundedBackground(0xff151d32.toInt(), 30f)
+        clipToPadding = false
+        clipChildren = false
+        setPadding(
+            dp(COLLAPSED_BUTTON_GAP_DP),
+            dp(COLLAPSED_BUTTON_GAP_DP + ATTACHMENT_SHOULDER_DP),
+            dp(COLLAPSED_BUTTON_GAP_DP),
+            dp(COLLAPSED_BUTTON_GAP_DP + ATTACHMENT_SHOULDER_DP),
+        )
+        collapsedBackground = attachmentBackground(Color.BLACK, COLLAPSED_BUTTON_GAP_DP)
+        background = collapsedBackground
         contentDescription = getString(R.string.overlay_idle)
-        addView(captureModeButton(CaptureMode.Dictation), LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+        addView(captureModeButton(CaptureMode.Dictation), LinearLayout.LayoutParams(dp(CAPTURE_BUTTON_SIZE_DP), dp(CAPTURE_BUTTON_SIZE_DP)).apply {
             bottomMargin = dp(6)
         })
-        addView(captureModeButton(CaptureMode.SmartNote), LinearLayout.LayoutParams(dp(48), dp(48)))
+        addView(
+            captureModeButton(CaptureMode.SmartNote),
+            LinearLayout.LayoutParams(dp(CAPTURE_BUTTON_SIZE_DP), dp(CAPTURE_BUTTON_SIZE_DP)),
+        )
     }
 
     private fun captureModeButton(mode: CaptureMode): FrameLayout = FrameLayout(this).apply {
@@ -153,13 +188,15 @@ class OverlayService : Service() {
         }, FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
         setOnClickListener { beginRecording(mode) }
         installDragGesture(this)
+        captureModeButtons += this
     }
 
     private fun buildExpandedPanel(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(14), dp(6), dp(8), dp(6))
-        background = roundedBackground(0xff151d32.toInt(), 30f)
+        setPadding(dp(14), dp(6 + ATTACHMENT_SHOULDER_DP), dp(8), dp(6 + ATTACHMENT_SHOULDER_DP))
+        expandedBackground = attachmentBackground(Color.BLACK)
+        background = expandedBackground
         contentDescription = getString(R.string.overlay_recording)
 
         modeIcon = ImageView(context).apply {
@@ -351,13 +388,7 @@ class OverlayService : Service() {
         val idle = state == OverlayState.Idle
         val recording = state as? OverlayState.Recording
         val processing = state as? OverlayState.Processing
-        if (idle) {
-            layoutParams.x = idleX
-            layoutParams.y = idleY
-        } else {
-            layoutParams.x = minOf(idleX, resources.displayMetrics.widthPixels - dp(310))
-            layoutParams.y = idleY
-        }
+        applyPosition(idle)
         collapsedButton.visibility = if (idle) View.VISIBLE else View.GONE
         expandedPanel.visibility = if (idle) View.GONE else View.VISIBLE
         modeIcon.visibility = if (recording != null || processing != null) View.VISIBLE else View.GONE
@@ -387,6 +418,7 @@ class OverlayService : Service() {
             getString(R.string.overlay_confirm)
         }
         root.animate().cancel()
+        root.translationX = 0f
         if (animationsEnabled()) {
             root.alpha = 0.82f
             root.scaleX = 0.96f
@@ -398,6 +430,7 @@ class OverlayService : Service() {
             root.scaleY = 1f
         }
         windowManager.updateViewLayout(root, layoutParams)
+        scheduleMeasuredPosition()
     }
 
     private fun installDragGesture(view: View) {
@@ -407,14 +440,19 @@ class OverlayService : Service() {
         var startX = 0
         var startY = 0
         var dragging = false
+        var startedEdge = OverlayEdge.None
         view.setOnTouchListener { target, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    root.animate().cancel()
+                    root.translationX = 0f
                     downX = event.rawX
                     downY = event.rawY
                     startX = layoutParams.x
                     startY = layoutParams.y
                     dragging = false
+                    startedEdge = attachmentEdge.takeIf { attachmentProgress >= 0.99f } ?: OverlayEdge.None
+                    attachmentAnimator?.cancel()
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -422,24 +460,250 @@ class OverlayService : Service() {
                     val dy = event.rawY - downY
                     if (abs(dx) > slop || abs(dy) > slop) dragging = true
                     if (dragging) {
-                        val maxX = max(0, resources.displayMetrics.widthPixels - root.width)
-                        val maxY = max(0, resources.displayMetrics.heightPixels - root.height)
-                        layoutParams.x = (startX + dx.toInt()).coerceIn(0, maxX)
-                        layoutParams.y = (startY + dy.toInt()).coerceIn(0, maxY)
+                        val viewport = currentViewportSize()
+                        val position = clampOverlayPosition(
+                            x = startX + dx.toInt(),
+                            y = startY + dy.toInt(),
+                            overlayWidth = root.width,
+                            overlayHeight = root.height,
+                            viewportWidth = viewport.width,
+                            viewportHeight = viewport.height,
+                            edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
+                        )
+                        layoutParams.x = position.x
+                        layoutParams.y = position.y
                         idleX = layoutParams.x
                         idleY = layoutParams.y
+                        setAttachment(
+                            edgeAttachment(
+                                x = layoutParams.x,
+                                overlayWidth = root.width,
+                                viewportWidth = viewport.width,
+                                transitionDistance = dp(ATTACHMENT_DISTANCE_DP),
+                                canAttachLeft = viewport.canAttachLeft,
+                                canAttachRight = viewport.canAttachRight,
+                            ),
+                        )
                         windowManager.updateViewLayout(root, layoutParams)
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!dragging) target.performClick()
+                    if (!dragging) {
+                        target.performClick()
+                    } else {
+                        finishDrag(target, startedEdge)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) finishDrag(target, startedEdge)
                     true
                 }
                 else -> false
             }
         }
     }
+
+    private fun repositionAfterViewportChange() {
+        val viewport = currentViewportSize()
+        val requestedX = when (attachmentEdge) {
+            OverlayEdge.Left -> Int.MIN_VALUE
+            OverlayEdge.Right -> Int.MAX_VALUE
+            OverlayEdge.None -> idleX
+        }
+        val idlePosition = clampOverlayPosition(
+            x = requestedX,
+            y = idleY,
+            overlayWidth = dp(COLLAPSED_PANEL_WIDTH_DP),
+            overlayHeight = dp(COLLAPSED_PANEL_HEIGHT_DP),
+            viewportWidth = viewport.width,
+            viewportHeight = viewport.height,
+            edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
+        )
+        idleX = idlePosition.x
+        idleY = idlePosition.y
+        applyPosition(state == OverlayState.Idle)
+        windowManager.updateViewLayout(root, layoutParams)
+        scheduleMeasuredPosition()
+    }
+
+    private fun anchorPositionToTopRight() {
+        val viewport = currentViewportSize()
+        val idlePosition = topRightOverlayPosition(
+            overlayWidth = dp(COLLAPSED_PANEL_WIDTH_DP),
+            overlayHeight = dp(COLLAPSED_PANEL_HEIGHT_DP),
+            viewportWidth = viewport.width,
+            viewportHeight = viewport.height,
+            edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
+        )
+        idleX = idlePosition.x
+        idleY = idlePosition.y
+        applyPosition(state == OverlayState.Idle)
+        windowManager.updateViewLayout(root, layoutParams)
+        scheduleMeasuredPosition()
+    }
+
+    private fun applyPosition(idle: Boolean) {
+        val viewport = currentViewportSize()
+        val position = clampOverlayPosition(
+            x = idleX,
+            y = idleY,
+            overlayWidth = dp(if (idle) COLLAPSED_PANEL_WIDTH_DP else EXPANDED_PANEL_WIDTH_DP),
+            overlayHeight = dp(if (idle) COLLAPSED_PANEL_HEIGHT_DP else EXPANDED_PANEL_HEIGHT_DP),
+            viewportWidth = viewport.width,
+            viewportHeight = viewport.height,
+            edgeMargin = dp(OVERLAY_EDGE_MARGIN_DP),
+        )
+        layoutParams.x = position.x
+        layoutParams.y = position.y
+    }
+
+    private fun applyMeasuredPosition() {
+        if (root.width <= 0 || root.height <= 0) return
+        val viewport = currentViewportSize()
+        val position = clampOverlayPosition(
+            x = idleX,
+            y = idleY,
+            overlayWidth = root.width,
+            overlayHeight = root.height,
+            viewportWidth = viewport.width,
+            viewportHeight = viewport.height,
+        )
+        if (layoutParams.x != position.x || layoutParams.y != position.y) {
+            layoutParams.x = position.x
+            layoutParams.y = position.y
+            windowManager.updateViewLayout(root, layoutParams)
+        }
+        val target = edgeAttachment(
+            x = position.x,
+            overlayWidth = root.width,
+            viewportWidth = viewport.width,
+            transitionDistance = dp(ATTACHMENT_DISTANCE_DP),
+            canAttachLeft = viewport.canAttachLeft,
+            canAttachRight = viewport.canAttachRight,
+        )
+        animateAttachmentTo(target)
+    }
+
+    private fun scheduleMeasuredPosition() {
+        root.post {
+            if (root.isAttachedToWindow) applyMeasuredPosition()
+        }
+    }
+
+    private fun finishDrag(target: View, startedEdge: OverlayEdge) {
+        val viewport = currentViewportSize()
+        val maxX = (viewport.width - root.width).coerceAtLeast(0)
+        val attachment = edgeAttachment(
+            x = layoutParams.x,
+            overlayWidth = root.width,
+            viewportWidth = viewport.width,
+            transitionDistance = dp(ATTACHMENT_DISTANCE_DP),
+            canAttachLeft = viewport.canAttachLeft,
+            canAttachRight = viewport.canAttachRight,
+        )
+        if (attachment.edge == OverlayEdge.None) {
+            animateAttachmentTo(EdgeAttachment(OverlayEdge.None, 0f))
+            return
+        }
+
+        val previousX = layoutParams.x
+        val attachedX = if (attachment.edge == OverlayEdge.Left) 0 else maxX
+        layoutParams.x = attachedX
+        idleX = attachedX
+        windowManager.updateViewLayout(root, layoutParams)
+        animateAttachmentTo(EdgeAttachment(attachment.edge, 1f))
+        if (startedEdge != attachment.edge) target.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        if (animationsEnabled() && previousX != attachedX) {
+            root.translationX = (previousX - attachedX).toFloat()
+            root.animate()
+                .translationX(0f)
+                .setDuration(ATTACHMENT_ANIMATION_MS)
+                .setInterpolator(ATTACHMENT_EASING)
+                .start()
+        } else {
+            root.translationX = 0f
+        }
+    }
+
+    private fun animateAttachmentTo(target: EdgeAttachment) {
+        attachmentAnimator?.cancel()
+        if (target.edge != OverlayEdge.None && target.edge != attachmentEdge) {
+            attachmentEdge = target.edge
+        }
+        if (!animationsEnabled() || attachmentProgress == target.progress) {
+            setAttachment(target)
+            return
+        }
+        attachmentAnimator = ValueAnimator.ofFloat(attachmentProgress, target.progress).apply {
+            duration = ATTACHMENT_ANIMATION_MS
+            interpolator = ATTACHMENT_EASING
+            addUpdateListener {
+                val progress = it.animatedValue as Float
+                val edge = if (progress == 0f && target.edge == OverlayEdge.None) {
+                    OverlayEdge.None
+                } else {
+                    attachmentEdge
+                }
+                setAttachment(EdgeAttachment(edge, progress))
+            }
+            start()
+        }
+    }
+
+    private fun setAttachment(attachment: EdgeAttachment) {
+        if (attachment.edge != OverlayEdge.None) attachmentEdge = attachment.edge
+        attachmentProgress = attachment.progress.coerceIn(0f, 1f)
+        if (attachmentProgress == 0f && attachment.edge == OverlayEdge.None) attachmentEdge = OverlayEdge.None
+        if (::collapsedBackground.isInitialized) updateAttachmentDrawable(collapsedBackground)
+        if (::expandedBackground.isInitialized) updateAttachmentDrawable(expandedBackground)
+        val buttonLayout = edgeButtonLayout(
+            edge = attachmentEdge,
+            progress = attachmentProgress,
+            buttonWidth = dp(CAPTURE_BUTTON_SIZE_DP),
+            edgeGap = dp(COLLAPSED_BUTTON_GAP_DP),
+        )
+        captureModeButtons.forEach { button ->
+            if (button.layoutParams.width != buttonLayout.width) {
+                button.layoutParams = button.layoutParams.apply { width = buttonLayout.width }
+            }
+            button.translationX = buttonLayout.translationX
+        }
+    }
+
+    private fun updateAttachmentDrawable(drawable: EdgeAttachmentDrawable?) {
+        drawable ?: return
+        drawable.attachmentSide = attachmentEdge
+        drawable.attachmentProgress = attachmentProgress
+    }
+
+    @Suppress("DEPRECATION")
+    private fun currentViewportSize(): ViewportSize =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val metrics = windowManager.currentWindowMetrics
+            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+            )
+            ViewportSize(
+                width = (metrics.bounds.width() - insets.left - insets.right).coerceAtLeast(0),
+                height = (metrics.bounds.height() - insets.top - insets.bottom).coerceAtLeast(0),
+                canAttachLeft = insets.left == 0,
+                canAttachRight = insets.right == 0,
+            )
+        } else {
+            val bounds = Rect()
+            windowManager.defaultDisplay.getRectSize(bounds)
+            val cutout = windowManager.defaultDisplay.cutout
+            ViewportSize(
+                width = bounds.width(),
+                height = bounds.height(),
+                canAttachLeft = cutout?.safeInsetLeft.orZero() == 0,
+                canAttachRight = cutout?.safeInsetRight.orZero() == 0,
+            )
+        }
+
+    private fun Int?.orZero(): Int = this ?: 0
 
     private fun notification(message: String): Notification {
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -476,6 +740,19 @@ class OverlayService : Service() {
         cornerRadius = dp(radiusDp.toInt()).toFloat()
     }
 
+    private fun attachmentBackground(color: Int, innerInsetDp: Int = 0) = EdgeAttachmentDrawable(
+        color = color,
+        cornerRadius = dp(DETACHED_RADIUS_DP).toFloat(),
+        shoulderDepth = dp(ATTACHMENT_SHOULDER_DP).toFloat(),
+        innerInset = dp(innerInsetDp).toFloat(),
+        shadowRadius = dp(OVERLAY_SHADOW_RADIUS_DP).toFloat(),
+        shadowOffsetY = dp(OVERLAY_SHADOW_OFFSET_Y_DP).toFloat(),
+        shadowColor = OVERLAY_SHADOW_COLOR,
+    ).apply {
+        attachmentSide = this@OverlayService.attachmentEdge
+        attachmentProgress = this@OverlayService.attachmentProgress
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun animationsEnabled(): Boolean =
@@ -498,6 +775,13 @@ class OverlayService : Service() {
         data class Note(val capture: SmartNoteCapture) : OverlayResult
     }
 
+    private data class ViewportSize(
+        val width: Int,
+        val height: Int,
+        val canAttachLeft: Boolean,
+        val canAttachRight: Boolean,
+    )
+
     companion object {
         const val ACTION_STOP = "com.fluidvoice.remote.STOP_OVERLAY"
         private const val CHANNEL_ID = "fluidvoice-overlay"
@@ -505,8 +789,20 @@ class OverlayService : Service() {
         private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
         private const val COLLAPSED_PANEL_WIDTH_DP = 60
-        private const val COLLAPSED_PANEL_HEIGHT_DP = 114
-        private const val OVERLAY_EDGE_MARGIN_DP = 16
+        private const val COLLAPSED_PANEL_HEIGHT_DP = 134
+        private const val CAPTURE_BUTTON_SIZE_DP = 48
+        private const val EXPANDED_PANEL_WIDTH_DP = 294
+        private const val EXPANDED_PANEL_HEIGHT_DP = 84
+        private const val OVERLAY_EDGE_MARGIN_DP = 0
+        private const val ATTACHMENT_DISTANCE_DP = 24
+        private const val ATTACHMENT_SHOULDER_DP = 10
+        private const val COLLAPSED_BUTTON_GAP_DP = 6
+        private const val DETACHED_RADIUS_DP = 30
+        private const val OVERLAY_SHADOW_RADIUS_DP = 4
+        private const val OVERLAY_SHADOW_OFFSET_Y_DP = 2
+        private const val OVERLAY_SHADOW_COLOR = 0x52000000
+        private const val ATTACHMENT_ANIMATION_MS = 200L
+        private val ATTACHMENT_EASING = PathInterpolator(0.22f, 1f, 0.36f, 1f)
 
         @Volatile
         var isRunning = false
