@@ -13,31 +13,38 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.noties.markwon.Markwon
 
 @Composable
-fun MarkdownText(markdown: String, modifier: Modifier = Modifier) {
+fun MarkdownText(
+    markdown: String,
+    modifier: Modifier = Modifier,
+    textColor: androidx.compose.ui.graphics.Color = FluidInk,
+    linkColor: androidx.compose.ui.graphics.Color = FluidGreen,
+    textSizeSp: Float = 16f,
+) {
     val context = LocalContext.current
     val markwon = remember(context) { Markwon.create(context) }
-    val textColor = FluidInk.toArgb()
-    val linkColor = FluidGreen.toArgb()
+    val resolvedTextColor = textColor.toArgb()
+    val resolvedLinkColor = linkColor.toArgb()
 
     AndroidView(
         modifier = modifier,
         factory = { viewContext ->
             TextView(viewContext).apply {
                 setBackgroundColor(Color.TRANSPARENT)
-                setTextColor(textColor)
-                setLinkTextColor(linkColor)
+                setTextColor(resolvedTextColor)
+                setLinkTextColor(resolvedLinkColor)
                 setTextIsSelectable(true)
                 linksClickable = true
                 movementMethod = LinkMovementMethod.getInstance()
                 includeFontPadding = false
                 typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-                textSize = 16f
+                textSize = textSizeSp
                 setLineSpacing(0f, 1.18f)
             }
         },
         update = { textView ->
-            textView.setTextColor(textColor)
-            textView.setLinkTextColor(linkColor)
+            textView.setTextColor(resolvedTextColor)
+            textView.setLinkTextColor(resolvedLinkColor)
+            textView.textSize = textSizeSp
             markwon.setMarkdown(textView, markdown)
         },
     )

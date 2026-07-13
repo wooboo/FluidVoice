@@ -30,4 +30,20 @@ class SmartNoteTest {
         assertNull(capture.note.category)
         assertNull(capture.enhancementError)
     }
+
+    @Test
+    fun `note survives always-on display snapshot serialization`() {
+        val note = SmartNote(
+            id = "note-aod",
+            createdAt = Instant.parse("2026-07-14T08:15:00Z"),
+            title = "Shopping for dinner",
+            category = "Shopping",
+            tags = listOf("shopping", "today"),
+            body = "## To Buy\n- Tomatoes\n- Basil",
+            isAIEnhanced = true,
+            promptId = "shopping-list",
+        )
+
+        assertEquals(note, SmartNote.parse(SmartNote.encode(note)))
+    }
 }

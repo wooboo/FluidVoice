@@ -27,6 +27,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: CredentialStore
+    private lateinit var pinnedNoteStore: PinnedNoteStore
     private val client = RemoteClient()
     private val recorder by lazy { CompressedAudioRecorder(this) }
     private val handler = Handler(Looper.getMainLooper())
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = CredentialStore(this)
+        pinnedNoteStore = PinnedNoteStore(this)
         refreshSystemState()
         setContent {
             FluidVoiceTheme {
@@ -68,6 +70,7 @@ class MainActivity : ComponentActivity() {
                         refreshNotes = ::refreshNotes,
                         openNote = { uiState = uiState.copy(selectedNote = it) },
                         requestDeleteNote = { uiState = uiState.copy(notePendingDeletion = it, noteDeleteError = null) },
+                        showNoteOnAlwaysOnDisplay = ::showNoteOnAlwaysOnDisplay,
                         setNotesTagFilter = { uiState = uiState.copy(notesTagFilter = it, notesTagQuery = it.orEmpty()) },
                         setNotesTagQuery = { uiState = uiState.copy(notesTagQuery = it) },
                         dismissDeleteNote = {
@@ -173,6 +176,7 @@ class MainActivity : ComponentActivity() {
                     runOnUiThread {
                         val noteToOpen = pendingOpenNoteId?.let { id -> notes.firstOrNull { it.id == id } }
                         if (noteToOpen != null) pendingOpenNoteId = null
+                        val pinnedNoteId = pinnedNoteStore.reconcile(notes)
                         uiState = uiState.copy(
                             notes = notes,
                             notesLoading = false,
@@ -233,6 +237,7 @@ class MainActivity : ComponentActivity() {
                             notePendingDeletion = null,
                             isDeletingNote = false,
                             noteDeleteError = null,
+                            pinnedNoteId = if (pinnedNoteStore.clearIfPinned(note.id)) null else uiState.pinnedNoteId,
                         )
                         refreshNotes()
                     }
@@ -363,6 +368,7 @@ class MainActivity : ComponentActivity() {
                         selectedNote = capture.note,
                         notes = uiState.notes.map { if (it.id == capture.note.id) capture.note else it },
                     )
+                    pinnedNoteStore.updateIfPinned(capture.note)
                     refreshNotes()
                 }
             }.onFailure { error -> runOnUiThread { showError(error) } }
@@ -447,7 +453,14 @@ class MainActivity : ComponentActivity() {
             overlayRunning = OverlayService.isRunning,
             canDrawOverlays = Settings.canDrawOverlays(this),
             accessibilityEnabled = isAccessibilityEnabled(),
+            pinnedNoteId = pinnedNoteStore.pinnedNoteId(),
         )
+    }
+
+    private fun showNoteOnAlwaysOnDisplay(note: SmartNote) {
+        pinnedNoteStore.save(note)
+        uiState = uiState.copy(pinnedNoteId = note.id)
+        startActivity(Intent(this, AlwaysOnNoteActivity::class.java))
     }
 
     private fun isAccessibilityEnabled(): Boolean {

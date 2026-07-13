@@ -36,6 +36,7 @@ import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.ScreenLockPortrait
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Tune
@@ -99,6 +100,7 @@ data class AppUiState(
     val notePendingDeletion: SmartNote? = null,
     val isDeletingNote: Boolean = false,
     val noteDeleteError: String? = null,
+    val pinnedNoteId: String? = null,
 )
 
 data class AppActions(
@@ -106,6 +108,7 @@ data class AppActions(
     val refreshNotes: () -> Unit,
     val openNote: (SmartNote?) -> Unit,
     val requestDeleteNote: (SmartNote) -> Unit,
+    val showNoteOnAlwaysOnDisplay: (SmartNote) -> Unit,
     val setNotesTagFilter: (String?) -> Unit,
     val setNotesTagQuery: (String) -> Unit,
     val dismissDeleteNote: () -> Unit,
@@ -206,7 +209,9 @@ private fun NotesScreen(state: AppUiState, actions: AppActions) {
             Box(Modifier.fillMaxSize()) {
                 NoteDetail(
                     note = note,
+                    isPinned = state.pinnedNoteId == note.id,
                     onBack = { actions.openNote(null) },
+                    onAlwaysOnDisplay = { actions.showNoteOnAlwaysOnDisplay(note) },
                     onDelete = { actions.requestDeleteNote(note) },
                 )
                 NoteConversationFloatingControl(
@@ -247,7 +252,7 @@ private fun NotesScreen(state: AppUiState, actions: AppActions) {
                         if (filteredNotes.isEmpty()) {
                             ErrorState("No notes match this tag.", { actions.setNotesTagFilter(null) })
                         } else {
-                            NotesList(filteredNotes, actions.openNote)
+                            NotesList(filteredNotes, state.pinnedNoteId, actions.openNote)
                         }
                     }
                 }
@@ -433,10 +438,10 @@ private fun ErrorState(message: String, retry: () -> Unit) {
 }
 
 @Composable
-private fun NotesList(notes: List<SmartNote>, openNote: (SmartNote) -> Unit) {
+private fun NotesList(notes: List<SmartNote>, pinnedNoteId: String?, openNote: (SmartNote) -> Unit) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         items(notes, key = { it.id }) { note ->
-            NoteRow(note, openNote)
+            NoteRow(note, pinnedNoteId == note.id, openNote)
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.42f))
         }
         item { Spacer(Modifier.height(28.dp)) }
@@ -444,7 +449,7 @@ private fun NotesList(notes: List<SmartNote>, openNote: (SmartNote) -> Unit) {
 }
 
 @Composable
-private fun NoteRow(note: SmartNote, openNote: (SmartNote) -> Unit) {
+private fun NoteRow(note: SmartNote, isPinned: Boolean, openNote: (SmartNote) -> Unit) {
     Column(
         modifier = Modifier.fillMaxWidth().clickable { openNote(note) }.padding(vertical = 18.dp),
     ) {
@@ -456,6 +461,15 @@ private fun NoteRow(note: SmartNote, openNote: (SmartNote) -> Unit) {
                 modifier = Modifier.weight(1f),
             )
             Text(formatDate(note), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (isPinned) {
+                Spacer(Modifier.width(8.dp))
+                Icon(
+                    Icons.Rounded.ScreenLockPortrait,
+                    contentDescription = "Shown on always-on display",
+                    tint = FluidGreen,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
         Spacer(Modifier.height(7.dp))
         Text(note.title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -475,7 +489,13 @@ private fun NoteRow(note: SmartNote, openNote: (SmartNote) -> Unit) {
 }
 
 @Composable
-private fun NoteDetail(note: SmartNote, onBack: () -> Unit, onDelete: () -> Unit) {
+private fun NoteDetail(
+    note: SmartNote,
+    isPinned: Boolean,
+    onBack: () -> Unit,
+    onAlwaysOnDisplay: () -> Unit,
+    onDelete: () -> Unit,
+) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
         item {
             Row(
@@ -492,6 +512,22 @@ private fun NoteDetail(note: SmartNote, onBack: () -> Unit, onDelete: () -> Unit
                     }
                 }
                 Spacer(Modifier.width(8.dp))
+                Surface(
+                    onClick = onAlwaysOnDisplay,
+                    shape = CircleShape,
+                    color = if (isPinned) FluidGreen else MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.size(44.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Rounded.ScreenLockPortrait,
+                            contentDescription = if (isPinned) "Open always-on display" else "Show on always-on display",
+                            tint = if (isPinned) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
                 IconButton(onClick = onDelete) {
                     Icon(
                         Icons.Rounded.DeleteOutline,
@@ -501,6 +537,14 @@ private fun NoteDetail(note: SmartNote, onBack: () -> Unit, onDelete: () -> Unit
                 }
             }
             Text(note.category?.uppercase(Locale.getDefault()) ?: "SMART NOTE", style = MaterialTheme.typography.labelLarge, color = FluidOrange)
+            if (isPinned) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Selected for always-on display · tap the screen icon to reopen",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = FluidGreen,
+                )
+            }
             Spacer(Modifier.height(8.dp))
             Text(note.title, style = MaterialTheme.typography.displaySmall)
             Spacer(Modifier.height(10.dp))

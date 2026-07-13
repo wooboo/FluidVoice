@@ -27,6 +27,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".AlwaysOnNoteActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:theme="@style/AppTheme" />
+
         <service
             android:name=".OverlayService"
             android:exported="false"

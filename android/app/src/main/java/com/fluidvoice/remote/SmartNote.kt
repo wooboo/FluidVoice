@@ -31,6 +31,16 @@ data class SmartNote(
             isAIEnhanced = json.getBoolean("isAIEnhanced"),
             promptId = if (json.isNull("promptID")) null else json.getString("promptID").takeIf { it.isNotBlank() },
         )
+
+        fun encode(note: SmartNote): JSONObject = JSONObject()
+            .put("id", note.id)
+            .put("createdAt", note.createdAt.toString())
+            .put("title", note.title)
+            .put("category", note.category ?: JSONObject.NULL)
+            .put("tags", org.json.JSONArray(note.tags))
+            .put("body", note.body)
+            .put("isAIEnhanced", note.isAIEnhanced)
+            .put("promptID", note.promptId ?: JSONObject.NULL)
     }
 }
 
