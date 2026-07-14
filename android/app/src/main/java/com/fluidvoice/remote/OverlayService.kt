@@ -230,12 +230,12 @@ class OverlayService : Service() {
         }
         addView(errorLabel, LinearLayout.LayoutParams(dp(120), WindowManager.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8) })
 
-        rejectButton = actionButton(R.drawable.ic_reject, R.string.overlay_reject, 0xffa93643.toInt()) {
+        rejectButton = actionButton(R.drawable.ic_reject, R.string.overlay_reject, CaptureChrome.REJECT.toInt()) {
             rejectRecording()
         }
         addView(rejectButton, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(6) })
 
-        confirmButton = actionButton(R.drawable.ic_confirm, R.string.overlay_confirm, 0xff2e8b68.toInt()) {
+        confirmButton = actionButton(R.drawable.ic_confirm, R.string.overlay_confirm, CaptureChrome.CONFIRM.toInt()) {
             confirmRecording()
         }
         addView(confirmButton, LinearLayout.LayoutParams(dp(48), dp(48)))
@@ -434,7 +434,7 @@ class OverlayService : Service() {
     private fun colorFor(mode: OverlayPromptMode): Int = when {
         mode.icon == "list" -> 0xff2e8b68.toInt()
         mode.kind == RemotePromptKind.Dictation -> 0xff344363.toInt()
-        else -> 0xffa8462c.toInt()
+        else -> CaptureChrome.PROMPT_NOTE.toInt()
     }
 
     private fun descriptionFor(mode: OverlayPromptMode): Int = when {

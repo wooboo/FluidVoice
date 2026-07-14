@@ -217,7 +217,7 @@ private fun NotesScreen(state: AppUiState, actions: AppActions) {
                 NoteConversationFloatingControl(
                     state = state,
                     actions = actions,
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 0.dp, bottom = 20.dp),
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 20.dp),
                 )
             }
         } else {
@@ -566,20 +566,33 @@ private fun NoteConversationFloatingControl(state: AppUiState, actions: AppActio
         Surface(
             onClick = actions.startNoteConversation,
             enabled = state.isPaired,
-            color = if (state.isPaired) FluidOrange else MaterialTheme.colorScheme.surfaceVariant,
+            color = Color.Black,
             shape = CircleShape,
-            shadowElevation = if (state.isPaired) 8.dp else 0.dp,
-            modifier = modifier.size(58.dp),
+            shadowElevation = if (state.isPaired) 6.dp else 0.dp,
+            modifier = modifier.size(68.dp),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(Icons.Rounded.Mic, contentDescription = "Continue note by voice", tint = Color.White, modifier = Modifier.size(28.dp))
+                Surface(
+                    color = if (state.isPaired) Color(CaptureChrome.PROMPT_NOTE) else MaterialTheme.colorScheme.surfaceVariant,
+                    shape = CircleShape,
+                    modifier = Modifier.size(52.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Rounded.Mic,
+                            contentDescription = "Continue note by voice",
+                            tint = if (state.isPaired) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                }
             }
         }
     } else {
         Surface(
             color = Color.Black,
             shape = RoundedCornerShape(16.dp),
-            shadowElevation = 8.dp,
+            shadowElevation = 6.dp,
             modifier = modifier,
         ) {
             Row(
@@ -587,16 +600,35 @@ private fun NoteConversationFloatingControl(state: AppUiState, actions: AppActio
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
+                Surface(color = Color(CaptureChrome.PROMPT_NOTE), shape = CircleShape, modifier = Modifier.size(38.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            painterResource(R.drawable.ic_note_sparkles),
+                            contentDescription = "Continue note with AI",
+                            tint = Color.White,
+                            modifier = Modifier.size(21.dp),
+                        )
+                    }
+                }
                 if (state.isProcessing) {
-                    Box(Modifier.width(116.dp).height(48.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(26.dp), strokeWidth = 3.dp)
+                    Box(Modifier.width(116.dp).height(52.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = FluidOrange, modifier = Modifier.size(26.dp), strokeWidth = 3.dp)
                     }
                 } else {
-                    VoiceWaveform(state.audioLevel, Modifier.width(116.dp).height(48.dp).padding(horizontal = 8.dp))
-                    CaptureAction(Icons.Rounded.Close, "Discard", Color(0xFF9D3740), actions.rejectNoteConversation)
-                    CaptureAction(Icons.Rounded.Check, "Finish", FluidGreen, actions.confirmNoteConversation)
+                    VoiceWaveform(state.audioLevel, Modifier.width(116.dp).height(52.dp).padding(horizontal = 8.dp))
+                    NoteRecorderAction(Icons.Rounded.Close, "Discard", Color(CaptureChrome.REJECT), actions.rejectNoteConversation)
+                    NoteRecorderAction(Icons.Rounded.Check, "Finish", Color(CaptureChrome.CONFIRM), actions.confirmNoteConversation)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun NoteRecorderAction(icon: ImageVector, label: String, color: Color, action: () -> Unit) {
+    Surface(onClick = action, shape = CircleShape, color = color, modifier = Modifier.size(48.dp)) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = label, tint = Color.White, modifier = Modifier.size(24.dp))
         }
     }
 }
