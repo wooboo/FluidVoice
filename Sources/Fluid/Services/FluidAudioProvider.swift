@@ -234,6 +234,56 @@ final class FluidAudioProvider: TranscriptionProvider {
         }
     }
 
+    func transcribeFinalUsingStreamingPreview(_ samples: [Float]) async throws -> ASRTranscriptionResult {
+        guard let manager = self.finalAsrManager ?? self.streamingAsrManager else {
+            throw NSError(
+                domain: "FluidAudioProvider",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "ASR manager not initialized"]
+            )
+        }
+        if !self.isWordBoostingActive,
+           let streamedResult = try await self.finishUsingStreamingPreview(samples, manager: manager)
+        {
+            return streamedResult
+        }
+        return try await self.transcribeFinal(samples)
+    }
+
+    private func finishUsingStreamingPreview(
+        _ samples: [Float],
+        manager: AsrManager
+    ) async throws -> ASRTranscriptionResult? {
+        let cachedCount = self.latestStreamingPreviewSampleCount
+        guard cachedCount >= 32_000,
+              cachedCount <= samples.count,
+              samples.count - cachedCount <= 32_000,
+              !self.latestStreamingPreviewText.isEmpty,
+              let finishedAt = self.latestStreamingPreviewFinishedAt,
+              Date().timeIntervalSince1970 - finishedAt <= 5
+        else { return nil }
+
+        if cachedCount == samples.count {
+            let text = self.latestStreamingPreviewText
+            self.resetStreamingPreviewCache()
+            self.logFinalBenchmark(samples: samples, text: text, startedAt: Date().timeIntervalSince1970, usedFallback: false, source: "stream-cache")
+            return ASRTranscriptionResult(text: text, confidence: text.isEmpty ? 0 : 1)
+        }
+
+        let overlapSamples = 64_000
+        let tailStart = max(0, cachedCount - overlapSamples)
+        let tail = Array(samples[tailStart...])
+        let startedAt = Date().timeIntervalSince1970
+        let tailResult = try await manager.transcribe(tail, source: AudioSource.microphone)
+        let merged = StreamingTranscriptMerger.mergeBestEffort(
+            prefix: self.latestStreamingPreviewText,
+            overlappingSuffix: tailResult.text
+        )
+        self.resetStreamingPreviewCache()
+        self.logFinalBenchmark(samples: samples, text: merged, startedAt: startedAt, usedFallback: false, source: "stream-tail")
+        return ASRTranscriptionResult(text: merged, confidence: tailResult.confidence)
+    }
+
     private func logFinalBenchmark(
         samples: [Float],
         text: String,
@@ -382,6 +432,10 @@ final class FluidAudioProvider: TranscriptionProvider {
             code: -1,
             userInfo: [NSLocalizedDescriptionKey: "FluidAudio is not supported on Intel Macs"]
         )
+    }
+
+    func transcribeFinalUsingStreamingPreview(_ samples: [Float]) async throws -> ASRTranscriptionResult {
+        try await self.transcribe(samples)
     }
 
     func detectBoostedTerms(in text: String, limit: Int = 2) -> [String] {

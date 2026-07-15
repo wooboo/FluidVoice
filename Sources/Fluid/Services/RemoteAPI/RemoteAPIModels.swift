@@ -92,6 +92,25 @@ enum RemoteAPI {
         }
     }
 
+    enum StreamKind: String, Codable, Equatable {
+        case dictation
+        case smartNote = "smart-note"
+        case noteContinuation = "note-continuation"
+    }
+
+    struct StreamStartInput: Equatable {
+        let kind: StreamKind
+        let wantsEnhancement: Bool
+        let promptID: String?
+        let noteID: UUID?
+        let inputContext: InputFieldContext?
+        let requestID: String
+    }
+
+    struct StreamStartResponse: Codable, Equatable {
+        let id: String
+    }
+
     struct InputFieldContext: Codable, Equatable {
         let label: String?
         let placeholder: String?

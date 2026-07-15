@@ -45,9 +45,10 @@ class RemoteClient {
     ): String {
         val requestId = UUID.randomUUID().toString()
         val startedAt = SystemClock.elapsedRealtime()
-        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_start bytes=${audio.size} format=m4a enhance=$enhance")
-        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/dictate", body = audio) {
-            setRequestProperty("Content-Type", "audio/mp4")
+        val wav = PcmWav.wrap(audio)
+        Log.i(TAG, "REMOTE_BENCH id=$requestId phase=network_start bytes=${wav.size} format=wav enhance=$enhance")
+        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/dictate", body = wav) {
+            setRequestProperty("Content-Type", "audio/wav")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
             setRequestProperty("X-FluidVoice-Enhance", enhance.toString())
             encodeInputFieldContextHeader(inputContext, enhance)?.let {
@@ -67,8 +68,8 @@ class RemoteClient {
         promptId: String = "default",
     ): SmartNoteCapture {
         val requestId = UUID.randomUUID().toString()
-        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/notes", body = audio) {
-            setRequestProperty("Content-Type", "audio/mp4")
+        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/notes", body = PcmWav.wrap(audio)) {
+            setRequestProperty("Content-Type", "audio/wav")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
             setRequestProperty("X-FluidVoice-Enhance", enhance.toString())
             setRequestProperty("X-FluidVoice-Note-Prompt-ID", promptId)
@@ -88,9 +89,9 @@ class RemoteClient {
             connection.baseUrl,
             connection.fingerprint,
             "/remote/v1/notes/$noteId/messages",
-            body = audio,
+            body = PcmWav.wrap(audio),
         ) {
-            setRequestProperty("Content-Type", "audio/mp4")
+            setRequestProperty("Content-Type", "audio/wav")
             setRequestProperty("Authorization", "Bearer ${connection.credential}")
             setRequestProperty("X-FluidVoice-Note-Prompt-ID", promptId)
             setRequestProperty("X-Request-ID", requestId)
@@ -142,6 +143,71 @@ class RemoteClient {
             setRequestProperty("X-Request-ID", requestId)
         }
         Log.i(TAG, "REMOTE_BENCH id=$requestId phase=preconnect_done elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+    }
+
+    internal fun startStream(
+        connection: CredentialStore.Connection,
+        config: StreamingCaptureConfig,
+    ): String {
+        val requestId = UUID.randomUUID().toString()
+        val response = request(connection.baseUrl, connection.fingerprint, "/remote/v1/streams", body = ByteArray(0)) {
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+            setRequestProperty("X-Request-ID", requestId)
+            setRequestProperty("X-FluidVoice-Stream-Kind", config.kind.wireValue)
+            setRequestProperty("X-FluidVoice-Enhance", config.enhance.toString())
+            config.promptId?.let { setRequestProperty("X-FluidVoice-Prompt-ID", it) }
+            config.noteId?.let { setRequestProperty("X-FluidVoice-Note-ID", it) }
+            encodeInputFieldContextHeader(config.inputContext, config.enhance)?.let {
+                setRequestProperty("X-FluidVoice-Input-Context", it)
+            }
+        }
+        return JSONObject(String(response)).getString("id")
+    }
+
+    internal fun appendStream(connection: CredentialStore.Connection, streamId: String, pcm: ByteArray) {
+        request(
+            connection.baseUrl,
+            connection.fingerprint,
+            "/remote/v1/streams/$streamId/chunks",
+            body = pcm,
+        ) {
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+            setRequestProperty("Content-Type", "audio/pcm; rate=16000; channels=1")
+        }
+    }
+
+    internal fun finishStream(
+        connection: CredentialStore.Connection,
+        streamId: String,
+        kind: StreamingCaptureKind,
+    ): StreamingCaptureResult {
+        val response = request(
+            connection.baseUrl,
+            connection.fingerprint,
+            "/remote/v1/streams/$streamId/finish",
+            body = ByteArray(0),
+        ) {
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+        }
+        return when (kind) {
+            StreamingCaptureKind.Dictation -> StreamingCaptureResult.Dictation(
+                JSONObject(String(response)).getString("finalText"),
+            )
+            StreamingCaptureKind.SmartNote,
+            StreamingCaptureKind.NoteContinuation,
+            -> StreamingCaptureResult.Note(SmartNoteCapture.parse(String(response)))
+        }
+    }
+
+    internal fun cancelStream(connection: CredentialStore.Connection, streamId: String) {
+        request(
+            connection.baseUrl,
+            connection.fingerprint,
+            "/remote/v1/streams/$streamId",
+            method = "DELETE",
+        ) {
+            setRequestProperty("Authorization", "Bearer ${connection.credential}")
+        }
     }
 
     private fun request(

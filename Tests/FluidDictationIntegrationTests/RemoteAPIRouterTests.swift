@@ -3,6 +3,43 @@ import Foundation
 import Network
 import XCTest
 
+final class StreamingTranscriptMergerTests: XCTestCase {
+    func testMergesOverlappingTranscriptsWithoutRepeatingWords() {
+        let merged = StreamingTranscriptMerger.merge(
+            prefix: "Kup mleko chleb i pomidory",
+            overlappingSuffix: "chleb i pomidory oraz kawę"
+        )
+        XCTAssertEqual(merged, "Kup mleko chleb i pomidory oraz kawę")
+    }
+
+    func testMatchesOverlapIgnoringCaseAndPunctuation() {
+        let merged = StreamingTranscriptMerger.merge(
+            prefix: "To jest pierwsze zdanie. Następnie robimy test",
+            overlappingSuffix: "następnie robimy test, który działa"
+        )
+        XCTAssertEqual(merged, "To jest pierwsze zdanie. Następnie robimy test, który działa")
+    }
+
+    func testRejectsAmbiguousSingleWordOverlap() {
+        XCTAssertNil(StreamingTranscriptMerger.merge(prefix: "To jest test", overlappingSuffix: "test zakończony"))
+    }
+
+    func testBestEffortToleratesOneRevisedWordAtBoundary() {
+        let merged = StreamingTranscriptMerger.mergeBestEffort(
+            prefix: "Kup mleko chleb oraz świeże jabłka",
+            overlappingSuffix: "chleb i świeże jabłka jutro rano"
+        )
+        XCTAssertEqual(merged, "Kup mleko chleb oraz świeże jabłka jutro rano")
+    }
+
+    func testBestEffortNeverRequiresFullTranscriptionFallback() {
+        XCTAssertEqual(
+            StreamingTranscriptMerger.mergeBestEffort(prefix: "Pierwsza część", overlappingSuffix: "Druga część"),
+            "Pierwsza część Druga część"
+        )
+    }
+}
+
 @MainActor
 final class RemoteAPIRouterTests: XCTestCase {
     func testRemotePromptUsesItsOwnAIConfiguration() {
@@ -161,6 +198,73 @@ final class RemoteAPIRouterTests: XCTestCase {
         )
 
         let response = await router.route(.init(method: "POST", path: "/remote/v1/dictate", body: Data("audio".utf8)))
+
+        XCTAssertEqual(response.status, 401)
+    }
+
+    func testPairedDeviceCanStreamAudioChunksAndFinish() async throws {
+        let pairing = pairedCoordinator()
+        let streamID = UUID()
+        var appended = Data()
+        let router = RemoteAPIRouter(
+            pairing: pairing,
+            dictate: { _ in .init(rawText: "", finalText: "") },
+            startStream: { input, credential in
+                XCTAssertEqual(credential, "phone-token")
+                XCTAssertEqual(input.kind, .dictation)
+                XCTAssertTrue(input.wantsEnhancement)
+                XCTAssertEqual(input.promptID, "dictation-polish")
+                return streamID
+            },
+            appendStream: { id, audio, credential in
+                XCTAssertEqual(id, streamID)
+                XCTAssertEqual(credential, "phone-token")
+                appended.append(audio)
+            },
+            finishStream: { id, credential in
+                XCTAssertEqual(id, streamID)
+                XCTAssertEqual(credential, "phone-token")
+                return RemoteAPI.json(RemoteAPI.DictateResponse(rawText: "hej", finalText: "Hej."))
+            }
+        )
+
+        let started = await router.route(.init(
+            method: "POST",
+            path: "/remote/v1/streams",
+            headers: [
+                "authorization": "Bearer phone-token",
+                "x-fluidvoice-stream-kind": "dictation",
+                "x-fluidvoice-enhance": "true",
+                "x-fluidvoice-prompt-id": "dictation-polish",
+            ]
+        ))
+        XCTAssertEqual(started.status, 201)
+        XCTAssertEqual(try started.decode(RemoteAPI.StreamStartResponse.self).id, streamID.uuidString.lowercased())
+
+        let chunk = await router.route(.init(
+            method: "POST",
+            path: "/remote/v1/streams/\(streamID.uuidString.lowercased())/chunks",
+            headers: ["authorization": "Bearer phone-token", "content-type": "audio/pcm"],
+            body: Data([1, 2, 3, 4])
+        ))
+        XCTAssertEqual(chunk.status, 204)
+        XCTAssertEqual(appended, Data([1, 2, 3, 4]))
+
+        let finished = await router.route(.init(
+            method: "POST",
+            path: "/remote/v1/streams/\(streamID.uuidString.lowercased())/finish",
+            headers: ["authorization": "Bearer phone-token"]
+        ))
+        XCTAssertEqual(try finished.decode(RemoteAPI.DictateResponse.self).finalText, "Hej.")
+    }
+
+    func testStreamingEndpointsRejectMissingCredential() async {
+        let router = RemoteAPIRouter(
+            pairing: RemotePairingCoordinator(store: InMemoryRemoteDeviceStore()),
+            dictate: { _ in .init(rawText: "", finalText: "") }
+        )
+
+        let response = await router.route(.init(method: "POST", path: "/remote/v1/streams"))
 
         XCTAssertEqual(response.status, 401)
     }

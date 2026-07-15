@@ -28,10 +28,10 @@ import kotlin.concurrent.thread
 class MainActivity : ComponentActivity() {
     private lateinit var store: CredentialStore
     private val client = RemoteClient()
-    private val recorder by lazy { CompressedAudioRecorder(this) }
+    private val recorder by lazy { StreamingAudioRecorder(this) }
     private val handler = Handler(Looper.getMainLooper())
     private var uiState by mutableStateOf(AppUiState())
-    private var preconnectThread: Thread? = null
+    private var streamingUploader: StreamingCaptureUploader? = null
     private var microphonePermissionPurpose: MicrophonePermissionPurpose? = null
     private var pendingOpenNoteId: String? = null
 
@@ -119,7 +119,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        if (uiState.isRecording) runCatching { recorder.stop() }
+        if (uiState.isRecording) {
+            streamingUploader?.cancel()
+            streamingUploader = null
+            runCatching { recorder.stop() }
+        }
         super.onDestroy()
     }
 
@@ -254,20 +258,35 @@ class MainActivity : ComponentActivity() {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        runCatching { recorder.start() }
+        val connection = store.load() ?: run {
+            showError(IllegalStateException("Pair with your Mac first"))
+            return
+        }
+        val prompt = uiState.prompts.firstOrNull { it.id == uiState.selectedPromptId }
+            ?: RemotePrompt.fallbackPrompts.first()
+        val uploader = StreamingCaptureUploader(
+            client,
+            connection,
+            prompt.streamingCaptureConfig(),
+        )
+        runCatching { recorder.start(uploader::append) }
             .onSuccess {
+                streamingUploader = uploader
                 uiState = uiState.copy(isRecording = true, audioLevel = 0f, captureMessage = null)
-                preconnectThread = store.load()?.let { startPreconnect(it, "capture") }
                 handler.post(levelSampler)
             }
-            .onFailure(::showError)
+            .onFailure {
+                uploader.cancel()
+                showError(it)
+            }
     }
 
     private fun rejectCapture() {
         if (!uiState.isRecording) return
         handler.removeCallbacks(levelSampler)
+        streamingUploader?.cancel()
+        streamingUploader = null
         runCatching { recorder.stop() }
-        preconnectThread = null
         uiState = uiState.copy(isRecording = false, audioLevel = 0f, captureMessage = "Recording discarded")
     }
 
@@ -278,38 +297,21 @@ class MainActivity : ComponentActivity() {
             showError(it)
             return
         }
-        val connection = store.load() ?: run {
-            showError(IllegalStateException("Pair with your Mac first"))
+        val uploader = streamingUploader.also { streamingUploader = null } ?: run {
+            showError(IllegalStateException("Streaming capture is unavailable"))
             return
         }
-        val prompt = uiState.prompts.firstOrNull { it.id == uiState.selectedPromptId }
-            ?: RemotePrompt.fallbackPrompts.first()
-        val preparation = preconnectThread.also { preconnectThread = null }
         uiState = uiState.copy(isRecording = false, isProcessing = true, audioLevel = 0f, captureMessage = null)
-        Log.i(TAG, "REMOTE_BENCH phase=capture_stopped bytes=${audio.size} format=m4a prompt=${prompt.id}")
-        thread(name = "fluidvoice-capture") {
-            preparation?.join(PRECONNECT_WAIT_MS)
-            runCatching {
-                when (prompt.kind) {
-                    RemotePromptKind.Dictation -> CaptureResult.Dictation(
-                        client.dictate(
-                            connection = connection,
-                            audio = audio,
-                            enhance = !prompt.isWithoutAI,
-                            promptId = prompt.id.takeUnless { prompt.isWithoutAI },
-                        ),
-                    )
-                    RemotePromptKind.SmartNote -> CaptureResult.Note(
-                        client.captureNote(
-                            connection,
-                            audio,
-                            !prompt.isWithoutAI,
-                            prompt.id,
-                        ),
-                    )
-                }
-            }.onSuccess { result -> runOnUiThread { finishCapture(result) } }
-                .onFailure { error -> runOnUiThread { showError(error) } }
+        Log.i(TAG, "REMOTE_BENCH phase=capture_stopped bytes=${audio.size} format=pcm16")
+        uploader.finish(audio) { result ->
+            runOnUiThread {
+                result.onSuccess { streamed ->
+                    finishCapture(when (streamed) {
+                        is StreamingCaptureResult.Dictation -> CaptureResult.Dictation(streamed.text)
+                        is StreamingCaptureResult.Note -> CaptureResult.Note(streamed.capture)
+                    })
+                }.onFailure(::showError)
+            }
         }
     }
 
@@ -320,13 +322,31 @@ class MainActivity : ComponentActivity() {
             microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        runCatching { recorder.start() }
+        val connection = store.load() ?: run {
+            showError(IllegalStateException("Pair with your Mac first"))
+            return
+        }
+        val note = uiState.selectedNote ?: return
+        val uploader = StreamingCaptureUploader(
+            client,
+            connection,
+            StreamingCaptureConfig(
+                kind = StreamingCaptureKind.NoteContinuation,
+                enhance = true,
+                promptId = note.promptId(),
+                noteId = note.id,
+            ),
+        )
+        runCatching { recorder.start(uploader::append) }
             .onSuccess {
+                streamingUploader = uploader
                 uiState = uiState.copy(isRecording = true, audioLevel = 0f, captureMessage = null)
-                preconnectThread = store.load()?.let { startPreconnect(it, "note-conversation") }
                 handler.post(levelSampler)
             }
-            .onFailure(::showError)
+            .onFailure {
+                uploader.cancel()
+                showError(it)
+            }
     }
 
     private fun rejectNoteConversation() {
@@ -334,38 +354,30 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun confirmNoteConversation() {
-        val note = uiState.selectedNote ?: return
+        if (uiState.selectedNote == null) return
         if (!uiState.isRecording) return
         handler.removeCallbacks(levelSampler)
         val audio = runCatching { recorder.stop() }.getOrElse {
             showError(it)
             return
         }
-        val connection = store.load() ?: run {
-            showError(IllegalStateException("Pair with your Mac first"))
+        val uploader = streamingUploader.also { streamingUploader = null } ?: run {
+            showError(IllegalStateException("Streaming capture is unavailable"))
             return
         }
-        val preparation = preconnectThread.also { preconnectThread = null }
         uiState = uiState.copy(isRecording = false, isProcessing = true, audioLevel = 0f, captureMessage = null)
-        thread(name = "fluidvoice-note-conversation") {
-            preparation?.join(PRECONNECT_WAIT_MS)
-            runCatching {
-                client.continueNote(
-                    connection = connection,
-                    noteId = note.id,
-                    audio = audio,
-                    promptId = note.promptId(),
-                )
-            }.onSuccess { capture ->
-                runOnUiThread {
+        uploader.finish(audio) { result ->
+            runOnUiThread {
+                result.onSuccess { streamed ->
+                    val capture = (streamed as StreamingCaptureResult.Note).capture
                     uiState = uiState.copy(
                         isProcessing = false,
                         selectedNote = capture.note,
                         notes = uiState.notes.map { if (it.id == capture.note.id) capture.note else it },
                     )
                     refreshNotes()
-                }
-            }.onFailure { error -> runOnUiThread { showError(error) } }
+                }.onFailure(::showError)
+            }
         }
     }
 
@@ -468,12 +480,6 @@ class MainActivity : ComponentActivity() {
             .onFailure { Log.w(TAG, "Unable to restore overlay", it) }
     }
 
-    private fun startPreconnect(connection: CredentialStore.Connection, source: String): Thread =
-        thread(name = "fluidvoice-$source-preconnect") {
-            runCatching { client.preconnect(connection) }
-                .onFailure { Log.i(TAG, "REMOTE_BENCH phase=preconnect_failed source=$source error=${it.message}") }
-        }
-
     private fun showError(error: Throwable) {
         uiState = uiState.copy(
             isRecording = false,
@@ -494,7 +500,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val ACTION_OPEN_NOTE = "com.fluidvoice.remote.OPEN_NOTE"
         const val EXTRA_NOTE_ID = "note_id"
-        private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
     }
 }

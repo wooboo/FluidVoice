@@ -1472,7 +1472,10 @@ final class ASRService: ObservableObject {
                 finalSource = "dictionaryTraining"
             } else {
                 result = try await self.transcriptionExecutor.run { [provider] in
-                    try await provider.transcribeFinal(pcm)
+                    if let fluidProvider = provider as? FluidAudioProvider {
+                        return try await fluidProvider.transcribeFinalUsingStreamingPreview(pcm)
+                    }
+                    return try await provider.transcribeFinal(pcm)
                 }
                 finalSource = "full"
             }

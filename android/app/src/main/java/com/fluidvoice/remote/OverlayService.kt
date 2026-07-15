@@ -37,7 +37,6 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import android.util.Log
-import kotlin.concurrent.thread
 import kotlin.math.abs
 
 class OverlayService : Service() {
@@ -54,14 +53,14 @@ class OverlayService : Service() {
     private lateinit var rejectButton: ImageButton
     private lateinit var collapsedBackground: EdgeAttachmentDrawable
     private lateinit var expandedBackground: EdgeAttachmentDrawable
-    private lateinit var recorder: CompressedAudioRecorder
+    private lateinit var recorder: StreamingAudioRecorder
     private val captureModeButtons = mutableListOf<View>()
     private val client = RemoteClient()
     private val handler = Handler(Looper.getMainLooper())
     private var state: OverlayState = OverlayState.Idle
     private var idleX = 0
     private var idleY = 0
-    private var preconnectThread: Thread? = null
+    private var streamingUploader: StreamingCaptureUploader? = null
     private var amplitudeWindowStartedAt = 0L
     private var amplitudeMinimum = Int.MAX_VALUE
     private var amplitudeMaximum = 0
@@ -93,7 +92,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
-        recorder = CompressedAudioRecorder(this)
+        recorder = StreamingAudioRecorder(this)
         startForeground(NOTIFICATION_ID, notification("Ready to capture"))
         if (Settings.canDrawOverlays(this)) showOverlay() else stopSelf()
     }
@@ -113,6 +112,7 @@ class OverlayService : Service() {
         handler.removeCallbacksAndMessages(null)
         attachmentAnimator?.cancel()
         if (::root.isInitialized) windowManager.removeView(root)
+        streamingUploader?.cancel()
         if (state is OverlayState.Recording) runCatching { recorder.stop() }
         isRunning = false
         super.onDestroy()
@@ -255,23 +255,43 @@ class OverlayService : Service() {
 
     private fun beginRecording(mode: OverlayPromptMode) {
         if (state != OverlayState.Idle) return
+        val connection = CredentialStore(this).load() ?: run {
+            showError("Pair with your Mac first")
+            return
+        }
         val next = OverlayReducer.reduce(state, OverlayAction.Start(mode))
         inputFieldContext = if (mode.kind == RemotePromptKind.Dictation) {
             FluidAccessibilityService.captureTarget(includeContext = !mode.isWithoutAI)
         } else {
             null
         }
-        runCatching { recorder.start() }
+        val enhance = !mode.isWithoutAI
+        val uploader = StreamingCaptureUploader(
+            client,
+            connection,
+            StreamingCaptureConfig(
+                kind = if (mode.kind == RemotePromptKind.Dictation) {
+                    StreamingCaptureKind.Dictation
+                } else {
+                    StreamingCaptureKind.SmartNote
+                },
+                enhance = enhance,
+                promptId = mode.id.takeUnless { mode.isDictationWithoutAI },
+                inputContext = inputFieldContext.takeIf { mode.kind == RemotePromptKind.Dictation && enhance },
+            ),
+        )
+        runCatching { recorder.start(uploader::append) }
             .onSuccess {
+                streamingUploader = uploader
                 state = next
                 resetAmplitudeWindow(SystemClock.elapsedRealtime())
-                preconnectThread = CredentialStore(this).load()?.let { startPreconnect(it) }
                 collapsedButton.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 renderState()
                 handler.post(amplitudeSampler)
                 updateNotification("Listening")
             }
             .onFailure {
+                uploader.cancel()
                 if (mode.kind == RemotePromptKind.Dictation) FluidAccessibilityService.clearCapturedTarget()
                 inputFieldContext = null
                 showError(it.message ?: "Microphone is unavailable")
@@ -287,8 +307,9 @@ class OverlayService : Service() {
         }
         if (state !is OverlayState.Recording) return
         handler.removeCallbacks(amplitudeSampler)
+        streamingUploader?.cancel()
+        streamingUploader = null
         runCatching { recorder.stop() }
-        preconnectThread = null
         FluidAccessibilityService.clearCapturedTarget()
         inputFieldContext = null
         state = OverlayReducer.reduce(state, OverlayAction.Reject)
@@ -306,36 +327,20 @@ class OverlayService : Service() {
         state = OverlayReducer.reduce(state, OverlayAction.Confirm)
         renderState()
         updateNotification(if (recording.mode.isSmartNote) "Saving note" else "Transcribing")
-        val connection = CredentialStore(this).load()
-        if (connection == null) {
-            showError("Pair with your Mac first")
+        val uploader = streamingUploader.also { streamingUploader = null }
+        if (uploader == null) {
+            showError("Streaming capture is unavailable")
             return
         }
-        val mode = recording.mode
-        val enhance = !mode.isWithoutAI
-        val context = inputFieldContext.takeIf { mode.kind == RemotePromptKind.Dictation && enhance }
-        val preparation = preconnectThread.also { preconnectThread = null }
-        thread(name = "fluidvoice-overlay-capture") {
-            preparation?.join(PRECONNECT_WAIT_MS)
-            runCatching {
-                when (mode.kind) {
-                    RemotePromptKind.Dictation -> OverlayResult.Dictation(client.dictate(
-                        connection,
-                        audio,
-                        enhance,
-                        context,
-                        if (mode.isDictationWithoutAI) null else mode.id,
-                    ))
-                    RemotePromptKind.SmartNote -> OverlayResult.Note(client.captureNote(
-                        connection,
-                        audio,
-                        enhance,
-                        mode.id,
-                    ))
-                }
+        uploader.finish(audio) { result ->
+            handler.post {
+                result.onSuccess { streamed ->
+                    deliverResult(when (streamed) {
+                        is StreamingCaptureResult.Dictation -> OverlayResult.Dictation(streamed.text)
+                        is StreamingCaptureResult.Note -> OverlayResult.Note(streamed.capture)
+                    })
+                }.onFailure { error -> showError(error.message ?: "Transcription failed") }
             }
-                .onSuccess { result -> handler.post { deliverResult(result) } }
-                .onFailure { error -> handler.post { showError(error.message ?: "Transcription failed") } }
         }
     }
 
@@ -827,12 +832,6 @@ class OverlayService : Service() {
         amplitudeMaximum = 0
     }
 
-    private fun startPreconnect(connection: CredentialStore.Connection): Thread =
-        thread(name = "fluidvoice-overlay-preconnect") {
-            runCatching { client.preconnect(connection) }
-                .onFailure { Log.i(TAG, "REMOTE_BENCH phase=preconnect_failed source=overlay error=${it.message}") }
-        }
-
     private sealed interface OverlayResult {
         data class Dictation(val text: String) : OverlayResult
         data class Note(val capture: SmartNoteCapture) : OverlayResult
@@ -850,7 +849,6 @@ class OverlayService : Service() {
         const val ACTION_REFRESH = "com.fluidvoice.remote.REFRESH_OVERLAY"
         private const val CHANNEL_ID = "fluidvoice-overlay"
         private const val NOTIFICATION_ID = 7301
-        private const val PRECONNECT_WAIT_MS = 250L
         private const val TAG = "FluidVoiceRemote"
         private const val COLLAPSED_PANEL_WIDTH_DP = 60
         private const val COLLAPSED_VERTICAL_PADDING_DP = 32

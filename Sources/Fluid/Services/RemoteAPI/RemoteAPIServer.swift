@@ -14,6 +14,7 @@ final class RemoteAPIServer: ObservableObject {
     private let queue = DispatchQueue(label: "fluidvoice.remote-api", qos: .utility)
     private let store = RemoteDeviceKeychainStore()
     private lazy var pairing = RemotePairingCoordinator(store: self.store)
+    private lazy var streamingCapture = RemoteStreamingCaptureService(asr: AppServices.shared.asr)
     private lazy var router = RemoteAPIRouter(
         pairing: self.pairing,
         dictate: Self.dictate,
@@ -21,7 +22,22 @@ final class RemoteAPIServer: ObservableObject {
         continueNote: Self.continueNote,
         listNotes: { SmartNoteCaptureService.shared.notes() },
         listPrompts: Self.listPrompts,
-        deleteNote: { try SmartNoteCaptureService.shared.delete(id: $0) }
+        deleteNote: { try SmartNoteCaptureService.shared.delete(id: $0) },
+        startStream: { [weak self] input, credential in
+            guard let self else { throw RemoteStreamingError.unavailable }
+            return try await self.streamingCapture.start(input: input, credential: credential)
+        },
+        appendStream: { [weak self] id, audio, credential in
+            guard let self else { throw RemoteStreamingError.unavailable }
+            try await self.streamingCapture.append(id: id, pcm16LE: audio, credential: credential)
+        },
+        finishStream: { [weak self] id, credential in
+            guard let self else { throw RemoteStreamingError.unavailable }
+            return try await self.finishStream(id: id, credential: credential)
+        },
+        cancelStream: { [weak self] id, credential in
+            self?.streamingCapture.cancel(id: id, credential: credential)
+        }
     )
     private var listener: NWListener?
     private var connections: [ObjectIdentifier: RemoteAPIConnectionHandler] = [:]
@@ -248,6 +264,50 @@ final class RemoteAPIServer: ObservableObject {
                 finalText: raw,
                 enhancementError: error.localizedDescription
             )
+        }
+    }
+
+    private func finishStream(id: UUID, credential: String) async throws -> RemoteAPI.Response {
+        let completion = try await self.streamingCapture.finish(id: id, credential: credential)
+        let input = completion.input
+        let raw = completion.rawText
+        Self.log(input.requestID, "stream_asr_done chars=\(raw.count)")
+
+        switch input.kind {
+        case .dictation:
+            guard input.wantsEnhancement else {
+                return RemoteAPI.json(RemoteAPI.DictateResponse(rawText: raw, finalText: raw))
+            }
+            do {
+                let enhanced = try await DictationPostProcessingService.shared.process(
+                    raw,
+                    promptOverride: Self.dictationPromptOverride(for: input.promptID),
+                    inputContext: input.inputContext,
+                    providerConfiguration: SettingsStore.shared.remoteAIConfiguration(promptID: input.promptID)
+                ).text
+                return RemoteAPI.json(RemoteAPI.DictateResponse(rawText: raw, finalText: enhanced))
+            } catch {
+                return RemoteAPI.json(RemoteAPI.DictateResponse(
+                    rawText: raw,
+                    finalText: raw,
+                    enhancementError: error.localizedDescription
+                ))
+            }
+        case .smartNote:
+            let response = try await SmartNoteCaptureService.shared.capture(
+                rawText: raw,
+                enhance: input.wantsEnhancement,
+                promptID: input.promptID
+            )
+            return RemoteAPI.json(response, status: 201)
+        case .noteContinuation:
+            guard let noteID = input.noteID else { throw SmartNotesError.noteNotFound }
+            let response = try await SmartNoteCaptureService.shared.continueNote(
+                id: noteID,
+                rawText: raw,
+                promptID: input.promptID
+            )
+            return RemoteAPI.json(response)
         }
     }
 

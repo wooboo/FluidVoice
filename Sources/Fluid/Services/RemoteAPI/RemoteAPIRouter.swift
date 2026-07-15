@@ -8,6 +8,10 @@ final class RemoteAPIRouter {
     typealias ListNotes = () -> [RemoteAPI.SmartNoteResponse]
     typealias ListPrompts = () -> [RemoteAPI.PromptResponse]
     typealias DeleteNote = (UUID) throws -> Void
+    typealias StartStream = (RemoteAPI.StreamStartInput, String) async throws -> UUID
+    typealias AppendStream = (UUID, Data, String) async throws -> Void
+    typealias FinishStream = (UUID, String) async throws -> RemoteAPI.Response
+    typealias CancelStream = (UUID, String) async -> Void
 
     private let pairing: RemotePairingCoordinator
     private let dictate: Dictate
@@ -16,6 +20,10 @@ final class RemoteAPIRouter {
     private let listNotes: ListNotes
     private let listPrompts: ListPrompts
     private let deleteNote: DeleteNote
+    private let startStream: StartStream
+    private let appendStream: AppendStream
+    private let finishStream: FinishStream
+    private let cancelStream: CancelStream
 
     init(
         pairing: RemotePairingCoordinator,
@@ -24,7 +32,11 @@ final class RemoteAPIRouter {
         continueNote: @escaping ContinueNote = { _, _ in throw SmartNotesError.noteNotFound },
         listNotes: @escaping ListNotes = { [] },
         listPrompts: @escaping ListPrompts = { [] },
-        deleteNote: @escaping DeleteNote = { _ in throw SmartNotesError.noteNotFound }
+        deleteNote: @escaping DeleteNote = { _ in throw SmartNotesError.noteNotFound },
+        startStream: @escaping StartStream = { _, _ in throw RemoteStreamingError.unavailable },
+        appendStream: @escaping AppendStream = { _, _, _ in throw RemoteStreamingError.unavailable },
+        finishStream: @escaping FinishStream = { _, _ in throw RemoteStreamingError.unavailable },
+        cancelStream: @escaping CancelStream = { _, _ in }
     ) {
         self.pairing = pairing
         self.dictate = dictate
@@ -33,6 +45,10 @@ final class RemoteAPIRouter {
         self.listNotes = listNotes
         self.listPrompts = listPrompts
         self.deleteNote = deleteNote
+        self.startStream = startStream
+        self.appendStream = appendStream
+        self.finishStream = finishStream
+        self.cancelStream = cancelStream
     }
 
     func route(_ request: RemoteAPI.Request) async -> RemoteAPI.Response {
@@ -43,6 +59,14 @@ final class RemoteAPIRouter {
             return self.preconnect(request)
         case ("POST", "/remote/v1/dictate"):
             return await self.handleDictate(request)
+        case ("POST", "/remote/v1/streams"):
+            return await self.handleStartStream(request)
+        case ("POST", let path) where path.hasPrefix(Self.streamsPathPrefix) && path.hasSuffix(Self.streamChunksSuffix):
+            return await self.handleAppendStream(request, path: path)
+        case ("POST", let path) where path.hasPrefix(Self.streamsPathPrefix) && path.hasSuffix(Self.streamFinishSuffix):
+            return await self.handleFinishStream(request, path: path)
+        case ("DELETE", let path) where path.hasPrefix(Self.streamsPathPrefix):
+            return await self.handleCancelStream(request, path: path)
         case ("GET", "/remote/v1/prompts"):
             return self.handleListPrompts(request)
         case ("GET", "/remote/v1/notes"):
@@ -56,6 +80,82 @@ final class RemoteAPIRouter {
         default:
             return RemoteAPI.error("Route not found.", status: 404)
         }
+    }
+
+    private func handleStartStream(_ request: RemoteAPI.Request) async -> RemoteAPI.Response {
+        let requestID = Self.requestID(from: request)
+        guard let credential = Self.authorizedCredential(from: request, pairing: self.pairing) else {
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        guard let kindValue = request.headers["x-fluidvoice-stream-kind"],
+              let kind = RemoteAPI.StreamKind(rawValue: kindValue.lowercased())
+        else {
+            return RemoteAPI.error("Invalid stream kind.", status: 400)
+        }
+        let noteID = request.headers["x-fluidvoice-note-id"].flatMap(UUID.init(uuidString:))
+        if kind == .noteContinuation, noteID == nil {
+            return RemoteAPI.error("Missing note ID.", status: 400)
+        }
+        do {
+            let wantsEnhancement = request.headers["x-fluidvoice-enhance"]?.lowercased() != "false"
+            let id = try await self.startStream(.init(
+                kind: kind,
+                wantsEnhancement: wantsEnhancement,
+                promptID: Self.streamPromptID(from: request),
+                noteID: noteID,
+                inputContext: kind == .dictation && wantsEnhancement ? Self.inputContext(from: request) : nil,
+                requestID: requestID
+            ), credential)
+            return RemoteAPI.json(RemoteAPI.StreamStartResponse(id: id.uuidString.lowercased()), status: 201)
+        } catch {
+            return RemoteAPI.error(error.localizedDescription, status: 400)
+        }
+    }
+
+    private func handleAppendStream(_ request: RemoteAPI.Request, path: String) async -> RemoteAPI.Response {
+        guard let credential = Self.authorizedCredential(from: request, pairing: self.pairing) else {
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        guard request.headers["content-type"]?.lowercased().contains("audio/pcm") == true,
+              !request.body.isEmpty
+        else {
+            return RemoteAPI.error("Missing PCM audio chunk.", status: 400)
+        }
+        guard let id = Self.streamID(from: path, suffix: Self.streamChunksSuffix) else {
+            return RemoteAPI.error("Invalid stream ID.", status: 400)
+        }
+        do {
+            try await self.appendStream(id, request.body, credential)
+            return RemoteAPI.Response(status: 204, headers: [:], body: Data())
+        } catch {
+            return RemoteAPI.error(error.localizedDescription, status: 400)
+        }
+    }
+
+    private func handleFinishStream(_ request: RemoteAPI.Request, path: String) async -> RemoteAPI.Response {
+        guard let credential = Self.authorizedCredential(from: request, pairing: self.pairing) else {
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        guard let id = Self.streamID(from: path, suffix: Self.streamFinishSuffix) else {
+            return RemoteAPI.error("Invalid stream ID.", status: 400)
+        }
+        do {
+            return try await self.finishStream(id, credential)
+        } catch {
+            return RemoteAPI.error(error.localizedDescription, status: 400)
+        }
+    }
+
+    private func handleCancelStream(_ request: RemoteAPI.Request, path: String) async -> RemoteAPI.Response {
+        guard let credential = Self.authorizedCredential(from: request, pairing: self.pairing) else {
+            return RemoteAPI.error("Unauthorized.", status: 401)
+        }
+        let idText = String(path.dropFirst(Self.streamsPathPrefix.count))
+        guard !idText.contains("/"), let id = UUID(uuidString: idText) else {
+            return RemoteAPI.error("Invalid stream ID.", status: 400)
+        }
+        await self.cancelStream(id, credential)
+        return RemoteAPI.Response(status: 204, headers: [:], body: Data())
     }
 
     private func handleDeleteNote(_ request: RemoteAPI.Request, path: String) -> RemoteAPI.Response {
@@ -212,6 +312,14 @@ final class RemoteAPIRouter {
         return parts[1]
     }
 
+    private static func authorizedCredential(
+        from request: RemoteAPI.Request,
+        pairing: RemotePairingCoordinator
+    ) -> String? {
+        guard let credential = self.bearerCredential(from: request), pairing.authorizes(credential) else { return nil }
+        return credential
+    }
+
     static func requestID(from request: RemoteAPI.Request) -> String {
         let candidate = request.headers["x-request-id"] ?? UUID().uuidString.lowercased()
         let allowed = candidate.filter { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
@@ -264,8 +372,33 @@ final class RemoteAPIRouter {
         return String(value.prefix(80)).nonEmpty
     }
 
+    private static func streamPromptID(from request: RemoteAPI.Request) -> String? {
+        let value = request.headers["x-fluidvoice-prompt-id"]?
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: "")
+        guard let value else { return nil }
+        return String(value.prefix(80)).nonEmpty
+    }
+
+    private static func streamID(from path: String, suffix: String) -> UUID? {
+        let start = path.index(path.startIndex, offsetBy: Self.streamsPathPrefix.count)
+        let end = path.index(path.endIndex, offsetBy: -suffix.count)
+        let value = String(path[start..<end])
+        guard !value.contains("/") else { return nil }
+        return UUID(uuidString: value)
+    }
+
     private static let notesPathPrefix = "/remote/v1/notes/"
     private static let noteMessagesSuffix = "/messages"
+    private static let streamsPathPrefix = "/remote/v1/streams/"
+    private static let streamChunksSuffix = "/chunks"
+    private static let streamFinishSuffix = "/finish"
+}
+
+enum RemoteStreamingError: LocalizedError {
+    case unavailable
+
+    var errorDescription: String? { "Streaming capture is unavailable." }
 }
 
 private extension String {
