@@ -37,6 +37,55 @@ final class RemoteAPIRouterTests: XCTestCase {
         )
     }
 
+    func testPromptReconciliationPreservesSmartNoteAIConfigurations() {
+        let settings = SettingsStore.shared
+        let originalProfiles = settings.dictationPromptProfiles
+        let originalConfigurations = settings.dictationPromptConfigurations
+        defer {
+            settings.dictationPromptProfiles = originalProfiles
+            settings.dictationPromptConfigurations = originalConfigurations
+        }
+        let customProfile = SettingsStore.DictationPromptProfile(
+            id: "smart-note-regression-test",
+            name: "Regression Smart Note",
+            prompt: "Return a structured note.",
+            mode: .smartNote
+        )
+        let dictationProfile = SettingsStore.DictationPromptProfile(
+            id: "dictation-regression-test",
+            name: "Regression Dictation",
+            prompt: "Clean the transcript.",
+            mode: .dictate
+        )
+        let builtInConfiguration = SettingsStore.DictationPromptConfiguration(
+            providerID: "built-in-smart-note-provider",
+            modelName: "built-in-smart-note-model"
+        )
+        let customConfiguration = SettingsStore.DictationPromptConfiguration(
+            providerID: "custom-smart-note-provider",
+            modelName: "custom-smart-note-model"
+        )
+        let dictationConfiguration = SettingsStore.DictationPromptConfiguration(
+            providerID: "dictation-provider",
+            modelName: "dictation-model"
+        )
+        settings.dictationPromptProfiles = originalProfiles + [customProfile, dictationProfile]
+        settings.dictationPromptConfigurations = [
+            "profile:\(SmartNoteCaptureService.defaultPromptID)": builtInConfiguration,
+            "profile:\(customProfile.id)": customConfiguration,
+            "profile:\(dictationProfile.id)": dictationConfiguration,
+        ]
+
+        settings.reconcilePromptStateAfterProfileChanges()
+
+        XCTAssertEqual(
+            settings.remoteAIConfiguration(promptID: SmartNoteCaptureService.defaultPromptID),
+            builtInConfiguration
+        )
+        XCTAssertEqual(settings.remoteAIConfiguration(promptID: customProfile.id), customConfiguration)
+        XCTAssertEqual(settings.remoteAIConfiguration(promptID: dictationProfile.id), dictationConfiguration)
+    }
+
     func testRemotePromptFallsBackToBuiltInDefaultAIConfiguration() {
         let settings = SettingsStore.shared
         let original = settings.dictationPromptConfigurations
