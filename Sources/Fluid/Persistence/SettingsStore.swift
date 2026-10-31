@@ -3471,11 +3471,15 @@ final class SettingsStore: ObservableObject {
     }
 
     private func normalizeDictationPromptConfigurationsIfNeeded() {
-        let validKeys = Set(
-            ["__default__", "__privateAI__"] + self.dictationPromptProfiles
-                .filter { $0.mode.normalized == .dictate }
-                .map { "profile:\($0.id)" }
-        )
+        let builtInConfigurationKeys = [
+            DictationPromptSelection.default,
+            .privateAI,
+            .profile(SmartNoteCaptureService.defaultPromptID),
+        ].compactMap(self.dictationPromptConfigurationKey(for:))
+        let profileConfigurationKeys = self.dictationPromptProfiles
+            .filter { [.dictate, .smartNote].contains($0.mode.normalized) }
+            .compactMap { self.dictationPromptConfigurationKey(for: .profile($0.id)) }
+        let validKeys = Set(builtInConfigurationKeys + profileConfigurationKeys)
         var configurations = self.dictationPromptConfigurations
         let originalCount = configurations.count
         configurations = configurations.filter { key, configuration in
